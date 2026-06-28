@@ -181,3 +181,21 @@ def test_extract_manifest_from_output_finds_manifest():
 
 def test_extract_manifest_from_output_returns_none_when_absent():
     assert dub_job_helpers.extract_manifest_from_output("no json here") is None
+
+
+def test_write_review_file_handles_none_srt(tmp_path):
+    """write_review_file must not crash when srt_file is None (no SRT found)."""
+    job_dir = tmp_path / "personal_dub" / "456"
+    gen_dir = job_dir / "generated_audio"
+    manifest_data = _make_manifest(gen_dir)
+    manifest_path = job_dir / "openvoice_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
+    review_path = job_dir / "review_segments.json"
+
+    # Pass None for srt_file — should not raise
+    dub_job_helpers.write_review_file(
+        review_path, None, manifest_path, None, job_dir, gen_dir
+    )
+    review = json.loads(review_path.read_text(encoding="utf-8"))
+    assert len(review) == 2

@@ -243,6 +243,7 @@ def _mix_background_audio(
     import subprocess
     import tempfile
 
+    bg_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             bg_path = Path(tmp.name)
@@ -257,11 +258,9 @@ def _mix_background_audio(
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         if result.returncode != 0 or not bg_path.is_file():
-            bg_path.unlink(missing_ok=True)
             return False
 
         bg_samples, _ = load_audio_samples(bg_path, sample_rate)
-        bg_path.unlink(missing_ok=True)
 
         if _have_soundfile():
             import numpy as np
@@ -275,6 +274,9 @@ def _mix_background_audio(
         return True
     except Exception:
         return False
+    finally:
+        if bg_path is not None:
+            bg_path.unlink(missing_ok=True)
 
 
 def build_dubbed_audio(

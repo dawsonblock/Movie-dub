@@ -87,10 +87,6 @@ def newest_mp4(output_dir: Path, start_time: float) -> Path | None:
     return max(candidates, key=lambda path: path.stat().st_mtime) if candidates else None
 
 
-def extract_manifest_from_output(text: str) -> dict | None:
-    return _extract_manifest_from_output(text)
-
-
 def write_report(report: dict) -> None:
     JOB_DIR.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -216,7 +212,7 @@ def main() -> int:
     manifest = latest_manifest(started)
     queue_file = latest_queue(started)
     if not manifest:
-        extracted_manifest = extract_manifest_from_output(f"{result.stdout}\n{result.stderr}")
+        extracted_manifest = _extract_manifest_from_output(f"{result.stdout}\n{result.stderr}")
         if extracted_manifest:
             write_json = json.dumps(extracted_manifest, ensure_ascii=False, indent=2)
             STABLE_MANIFEST_PATH.write_text(write_json, encoding="utf-8")

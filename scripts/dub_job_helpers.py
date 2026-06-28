@@ -20,9 +20,9 @@ BUILD_AUDIO_SCRIPT = ROOT / "scripts" / "build_dubbed_audio_from_manifest.py"
 REMUX_SCRIPT = ROOT / "scripts" / "remux_dubbed_video.py"
 
 
-def parse_srt(path: Path) -> list[dict]:
+def parse_srt(path: Path | None) -> list[dict]:
     """Parse an SRT subtitle file into a list of {text, start, end} dicts."""
-    if not path.is_file():
+    if not path or not Path(path).is_file():
         return []
 
     def parse_timecode(value: str) -> float:
@@ -101,7 +101,7 @@ def write_review_file(
     review_path: Path,
     queue_file: Path | None,
     manifest_file: Path | None,
-    srt_file: Path,
+    srt_file: Path | None,
     job_dir: Path,
     generated_audio_dir: Path,
 ) -> None:

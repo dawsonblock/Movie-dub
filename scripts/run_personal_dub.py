@@ -83,31 +83,6 @@ def ffprobe_duration(path: Path) -> float:
     return float(result.stdout.strip())
 
 
-def set_preserve_dir(preserve_dir: Path) -> str | None:
-    if not PYVT_CONFIG.is_file():
-        return None
-    try:
-        cfg = read_json(PYVT_CONFIG)
-    except Exception:
-        cfg = {}
-    previous = cfg.get(PRESERVE_KEY, "")
-    preserve_dir.mkdir(parents=True, exist_ok=True)
-    cfg[PRESERVE_KEY] = preserve_dir.as_posix()
-    write_json(PYVT_CONFIG, cfg)
-    return previous
-
-
-def restore_preserve_dir(previous: str | None) -> None:
-    if previous is None or not PYVT_CONFIG.is_file():
-        return
-    try:
-        cfg = read_json(PYVT_CONFIG)
-    except Exception:
-        cfg = {}
-    cfg[PRESERVE_KEY] = previous
-    write_json(PYVT_CONFIG, cfg)
-
-
 def latest_artifact(root: Path, start_time: float, pattern: str) -> Path | None:
     candidates = [p for p in root.glob(pattern) if p.stat().st_mtime >= start_time]
     return max(candidates, key=lambda p: p.stat().st_mtime) if candidates else None
@@ -125,20 +100,6 @@ def latest_srt(start_time: float) -> Path | None:
     """Find the most recently created SRT file in the pyVideoTrans tmp root."""
     # pyVideoTrans writes SRTs to tmp/ with names like faster-YYYYMMDD-HH_MM_SS.srt
     return latest_artifact(PYVIDEOTRANS / "tmp", start_time, "**/*.srt")
-
-
-def extract_manifest_from_output(text: str) -> dict | None:
-    decoder = json.JSONDecoder()
-    for index, char in enumerate(text):
-        if char != "{":
-            continue
-        try:
-            candidate, _ = decoder.raw_decode(text[index:])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(candidate, dict) and {"ok", "error", "results"}.issubset(candidate):
-            return candidate
-    return None
 
 
 def run_subprocess(cmd: list[str], cwd: Path, label: str) -> subprocess.CompletedProcess:
@@ -263,7 +224,7 @@ def main() -> int:
     # --- Locate the OpenVoice manifest ---
     manifest = latest_manifest(started)
     if not manifest:
-        extracted = extract_manifest_from_output(f"{result.stdout}\n{result.stderr}")
+        extracted = _extract_manifest_from_output(f"{result.stdout}\n{result.stderr}")
         if extracted:
             write_json(stable_manifest, extracted)
             manifest = stable_manifest

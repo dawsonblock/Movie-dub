@@ -8,11 +8,8 @@ dub jobs (not just smoke jobs) support the regeneration workflow.
 import importlib.util
 import json
 import struct
-import sys
 import wave
 from pathlib import Path
-
-import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]

@@ -40,7 +40,11 @@ def parse_srt(path: Path | None) -> list[dict]:
             continue
         start_raw, end_raw = [part.strip() for part in lines[1].split("-->", 1)]
         text = " ".join(lines[2:])
-        items.append({"text": text, "start": parse_timecode(start_raw), "end": parse_timecode(end_raw)})
+        items.append({
+            "text": text,
+            "start": parse_timecode(start_raw),
+            "end": parse_timecode(end_raw),
+        })
     return items
 
 
@@ -131,8 +135,16 @@ def write_review_file(
                 or result.get("target_text")
                 or ""
             )
-            start = srt_items[index]["start"] if index < len(srt_items) else result.get("start", 0.0)
-            end = srt_items[index]["end"] if index < len(srt_items) else result.get("end", result.get("target_duration", 0.0))
+            start = (
+                srt_items[index]["start"]
+                if index < len(srt_items)
+                else result.get("start", 0.0)
+            )
+            end = (
+                srt_items[index]["end"]
+                if index < len(srt_items)
+                else result.get("end", result.get("target_duration", 0.0))
+            )
             queue.append(
                 {
                     "id": result.get("id", index + 1),
@@ -145,13 +157,18 @@ def write_review_file(
             )
 
     manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
-    manifest_by_id = {str(item.get("id", item.get("index"))): item for item in manifest.get("results", [])}
+    manifest_by_id = {
+        str(item.get("id", item.get("index"))): item
+        for item in manifest.get("results", [])
+    }
     review = []
     for index, item in enumerate(queue):
         segment_id = item.get("id", item.get("line", index + 1))
         result = manifest_by_id.get(str(segment_id), {})
         timing = result.get("timing_status", "unknown")
-        status = "needs_review" if timing in {"rewrite_shorter", "padding_or_slowdown_candidate"} else "ok"
+        status = "needs_review" if timing in {
+            "rewrite_shorter", "padding_or_slowdown_candidate"
+        } else "ok"
         if "start_time" in item or "end_time" in item:
             start = float(item.get("start_time", 0.0)) / 1000.0
             end = float(item.get("end_time", 0.0)) / 1000.0

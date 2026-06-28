@@ -6,8 +6,6 @@ import wave
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 
 ROOT = Path(__file__).resolve().parents[2]
 REGEN_PATH = ROOT / "scripts" / "regenerate_segment.py"

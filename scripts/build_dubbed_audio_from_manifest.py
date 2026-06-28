@@ -19,7 +19,6 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterable
 
 
 def local_ffmpeg() -> str:
@@ -536,17 +535,23 @@ def main() -> int:
     parser.add_argument("--sample-rate", type=int, default=DEFAULT_SAMPLE_RATE)
     parser.add_argument("--allow-partial", action="store_true")
     parser.add_argument("--background-volume", type=float, default=0.0,
-                        help="mix original audio at this volume (0.0=off, 0.15=quiet bg, 1.0=full)")
+                        help="mix original audio at this volume "
+                             "(0.0=off, 0.15=quiet bg, 1.0=full)")
     parser.add_argument("--voice-volume", type=float, default=1.0,
-                        help="gain applied to dubbed speech segments (1.0=normal, 1.5=louder, 0.5=quieter)")
+                        help="gain on dubbed speech "
+                             "(1.0=normal, 1.5=louder, 0.5=quieter)")
     parser.add_argument("--final-gain", type=float, default=1.0,
-                        help="gain applied to the final mix after normalization (1.0=no change)")
+                        help="gain applied to the final mix "
+                             "after normalization (1.0=no change)")
     parser.add_argument("--no-normalize", action="store_true",
-                        help="skip peak normalization (use with --final-gain for manual level control)")
+                        help="skip peak normalization "
+                             "(use with --final-gain for manual control)")
     parser.add_argument("--vocal-separation", action="store_true",
-                        help="remove center-channel vocals from background audio (karaoke-style)")
+                        help="remove center-channel vocals "
+                             "from background audio (karaoke-style)")
     parser.add_argument("--ducking", action="store_true",
-                        help="lower background volume where dubbed speech is present")
+                        help="lower background volume "
+                             "where dubbed speech is present")
     parser.add_argument("--target-lufs", type=float, default=None,
                         help="apply EBU R128 LUFS normalization (-16=web, -23=broadcast)")
     args = parser.parse_args()

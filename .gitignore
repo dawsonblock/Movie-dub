@@ -1,0 +1,26 @@
+.DS_Store
+._*
+
+# Local Python environments and caches
+**/.venv/
+**/__pycache__/
+**/.pytest_cache/
+*.pyc
+.env
+
+# Generated smoke-test artifacts
+/openvoice-test.wav
+/openvoice-test-manifest.json
+/pyvideotrans-openvoice-provider-test.wav
+/pyvideotrans-openvoice-provider-test.wav-openvoice.wav
+/assets/test_clip.aiff
+
+# Local runtime data and model assets. Recreate these from the setup steps.
+/pyvideotrans-main/models/
+/pyvideotrans-main/tmp/
+/pyvideotrans-main/output/
+/OpenVoice-main/checkpoints/
+/OpenVoice-main/checkpoints_v2/
+/OpenVoice-main/processed/
+/OpenVoice-main/outputs/
+/OpenVoice-main/outputs_v2/

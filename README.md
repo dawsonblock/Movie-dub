@@ -95,7 +95,8 @@ Optional flags:
 
 ```bash
 make dub INPUT=~/Movies/test.mp4 OUTPUT=~/Movies/dubbed-test.mp4 \
-     SOURCE=en TARGET=en REFERENCE=voices/openvoice_default_reference.wav
+     SOURCE=en TARGET=en REFERENCE=voices/openvoice_default_reference.wav \
+     BACKGROUND_VOLUME=0.15
 ```
 
 Or call the script directly:
@@ -106,13 +107,19 @@ python scripts/run_personal_dub.py \
   --source-language en \
   --target-language en \
   --reference voices/openvoice_default_reference.wav \
-  --output ~/Movies/dubbed-test.mp4
+  --output ~/Movies/dubbed-test.mp4 \
+  --background-volume 0.15
 ```
+
+`--background-volume` mixes the original audio (music, ambience) under the
+dubbed speech at the given volume. `0.0` (default) replaces the whole audio
+track with speech. `0.15` keeps background audio quiet under the dub.
 
 The wrapper runs the full pyVideoTrans VTV pipeline with OpenVoice, then
 rebuilds the dubbed audio track from the manifest and remuxes it into the
-final MP4. Job artifacts (manifest, segment WAVs, dubbed audio, report)
-are kept under `pyvideotrans-main/tmp/personal_dub/<timestamp>/`.
+final MP4. Job artifacts (manifest, segment WAVs, dubbed audio, review,
+remux command, report) are kept under
+`pyvideotrans-main/tmp/personal_dub/<timestamp>/`.
 
 ## Regenerate a Segment
 
@@ -127,7 +134,8 @@ python scripts/regenerate_segment.py \
 ```
 
 `--remux` rebuilds `dubbed_audio.wav` from the updated manifest and remuxes
-`final_dubbed.mp4`, so the change is reflected in the final video.
+`final_dubbed.mp4`, so the change is reflected in the final video. This
+works for both smoke jobs and personal dub jobs.
 
 ## Troubleshooting
 

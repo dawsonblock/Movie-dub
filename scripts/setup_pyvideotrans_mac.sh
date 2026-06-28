@@ -28,7 +28,7 @@ source .venv/bin/activate
 python -m pip install -U pip wheel setuptools
 
 if command -v uv >/dev/null 2>&1 && [ -f "uv.lock" ]; then
-  uv sync
+  UV_PROJECT_ENVIRONMENT=.venv uv sync --python "$PYTHON_BIN"
 elif [ -f "pyproject.toml" ]; then
   python -m pip install tomli
   REQ_FILE="$(mktemp "${TMPDIR:-/tmp}/pyvideotrans-requirements.XXXXXX")"

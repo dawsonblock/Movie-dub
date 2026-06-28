@@ -32,7 +32,7 @@ test-pyvt:
 
 # Personal dubbing wrapper. Usage:
 #   make dub INPUT=~/Movies/test.mp4 OUTPUT=~/Movies/dubbed-test.mp4
-# Optional: SOURCE=en TARGET=en REFERENCE=voices/openvoice_default_reference.wav
+# Optional: SOURCE=en TARGET=en REFERENCE=voices/openvoice_default_reference.wav BACKGROUND_VOLUME=0.15
 dub:
 	@if [ -z "$(INPUT)" ] || [ -z "$(OUTPUT)" ]; then \
 		echo "Usage: make dub INPUT=<input.mp4> OUTPUT=<output.mp4>"; \
@@ -43,4 +43,5 @@ dub:
 		--source-language $(or $(SOURCE),en) \
 		--target-language $(or $(TARGET),en) \
 		--reference $(or $(REFERENCE),voices/openvoice_default_reference.wav) \
-		--output "$(OUTPUT)"
+		--output "$(OUTPUT)" \
+		$(if $(BACKGROUND_VOLUME),--background-volume $(BACKGROUND_VOLUME))

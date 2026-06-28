@@ -232,12 +232,58 @@ def normalize(samples, target_peak: float = 0.97):
     return [float(v) * gain for v in samples]
 
 
+def _mix_background_audio(
+    canvas, input_video: Path, sample_rate: int, total_samples: int, volume: float
+) -> bool:
+    """Extract original audio from the input video and mix it under the speech canvas.
+
+    Uses ffmpeg to extract a mono WAV at the target sample rate, then adds it
+    to the canvas at the specified volume. Returns True if mixing succeeded.
+    """
+    import subprocess
+    import tempfile
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            bg_path = Path(tmp.name)
+        cmd = [
+            "ffmpeg", "-hide_banner", "-nostdin", "-y",
+            "-i", input_video.as_posix(),
+            "-vn",  # no video
+            "-ac", "1",  # mono
+            "-ar", str(sample_rate),
+            "-f", "wav",
+            bg_path.as_posix(),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0 or not bg_path.is_file():
+            bg_path.unlink(missing_ok=True)
+            return False
+
+        bg_samples, _ = load_audio_samples(bg_path, sample_rate)
+        bg_path.unlink(missing_ok=True)
+
+        if _have_soundfile():
+            import numpy as np
+            bg_arr = np.asarray(bg_samples, dtype="float32") * volume
+            n = min(len(bg_arr), total_samples)
+            canvas[:n] += bg_arr[:n]
+        else:
+            n = min(len(bg_samples), total_samples)
+            for i in range(n):
+                canvas[i] += float(bg_samples[i]) * volume
+        return True
+    except Exception:
+        return False
+
+
 def build_dubbed_audio(
     manifest_path: Path,
     input_video: Path,
     output_audio: Path,
     sample_rate: int = DEFAULT_SAMPLE_RATE,
     allow_partial: bool = False,
+    background_volume: float = 0.0,
 ) -> dict:
     manifest = read_json(manifest_path)
     segments = manifest_segments(manifest)
@@ -308,6 +354,13 @@ def build_dubbed_audio(
     if placed == 0:
         raise RuntimeError("no segments were placed on the audio canvas")
 
+    # Optionally mix original audio (background music, ambience) under the speech.
+    background_mix = False
+    if background_volume > 0:
+        background_mix = _mix_background_audio(
+            canvas, input_video, sample_rate, total_samples, background_volume
+        )
+
     normalized = normalize(canvas)
     write_audio_samples(output_audio, normalized, sample_rate)
 
@@ -323,6 +376,8 @@ def build_dubbed_audio(
         "segments_skipped": skipped,
         "segments_failed": failed,
         "errors": errors,
+        "background_volume": background_volume,
+        "background_mix": background_mix,
     }
 
 
@@ -334,6 +389,8 @@ def main() -> int:
     parser.add_argument("--work-dir", default="")
     parser.add_argument("--sample-rate", type=int, default=DEFAULT_SAMPLE_RATE)
     parser.add_argument("--allow-partial", action="store_true")
+    parser.add_argument("--background-volume", type=float, default=0.0,
+                        help="mix original audio at this volume (0.0=off, 0.15=quiet bg, 1.0=full)")
     args = parser.parse_args()
 
     manifest_path = Path(args.manifest).expanduser().resolve()
@@ -344,12 +401,15 @@ def main() -> int:
 
     try:
         report = build_dubbed_audio(
-            manifest_path, input_video, output_audio, args.sample_rate, args.allow_partial
+            manifest_path, input_video, output_audio, args.sample_rate, args.allow_partial,
+            background_volume=args.background_volume,
         )
         print("Build dubbed audio: PASS")
         print(f"Output: {output_audio}")
         print(f"Placed {report['segments_placed']}/{report['segments_total']} segments")
         print(f"Duration: {report['video_duration']:.3f}s @ {report['sample_rate']}Hz")
+        if args.background_volume > 0:
+            print(f"Background volume: {args.background_volume}")
         return 0
     except Exception as exc:
         print("Build dubbed audio: FAIL", file=sys.stderr)

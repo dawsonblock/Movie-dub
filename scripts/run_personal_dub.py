@@ -13,7 +13,8 @@ Workflow:
   4. Locate the OpenVoice manifest + preserved segment WAVs.
   5. Build dubbed_audio.wav from the manifest.
   6. Remux into the final output MP4.
-  7. Write report.json.
+  7. Write review_segments.json + remux_command.json for regeneration.
+  8. Write report.json.
 
 Example:
   python scripts/run_personal_dub.py \
@@ -33,6 +34,14 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+# Shared helpers for review_segments.json + remux_command.json
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from dub_job_helpers import (
+    extract_manifest_from_output as _extract_manifest_from_output,
+    write_remux_command as _write_remux_command,
+    write_review_file as _write_review_file,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -108,6 +117,16 @@ def latest_manifest(start_time: float) -> Path | None:
     return latest_artifact(PYVIDEOTRANS / "tmp", start_time, "**/openvoice-manifest-*.json")
 
 
+def latest_queue(start_time: float) -> Path | None:
+    return latest_artifact(PYVIDEOTRANS / "tmp", start_time, "**/openvoice-queue-*.json")
+
+
+def latest_srt(start_time: float) -> Path | None:
+    """Find the most recently created SRT file in the pyVideoTrans tmp root."""
+    # pyVideoTrans writes SRTs to tmp/ with names like faster-YYYYMMDD-HH_MM_SS.srt
+    return latest_artifact(PYVIDEOTRANS / "tmp", start_time, "**/*.srt")
+
+
 def extract_manifest_from_output(text: str) -> dict | None:
     decoder = json.JSONDecoder()
     for index, char in enumerate(text):
@@ -146,6 +165,8 @@ def main() -> int:
     parser.add_argument("--job-dir", default="", help="working directory (default: tmp/personal_dub/<timestamp>)")
     parser.add_argument("--allow-partial", action="store_true",
                         help="allow the final remux even if some segments failed")
+    parser.add_argument("--background-volume", type=float, default=0.0,
+                        help="mix original audio at this volume (0.0=off, 0.15=quiet bg, 1.0=full)")
     args = parser.parse_args()
 
     input_video = Path(args.input).expanduser().resolve()
@@ -180,6 +201,8 @@ def main() -> int:
     stable_manifest = job_dir / "openvoice_manifest.json"
     dubbed_audio = job_dir / "dubbed_audio.wav"
     report_path = job_dir / "report.json"
+    review_path = job_dir / "review_segments.json"
+    remux_path = job_dir / "remux_command.json"
 
     print(f"Input:    {input_video}")
     print(f"Output:   {output_video}")
@@ -288,6 +311,8 @@ def main() -> int:
         ]
         if args.allow_partial:
             build_cmd.append("--allow-partial")
+        if args.background_volume > 0:
+            build_cmd.extend(["--background-volume", str(args.background_volume)])
         build_result = run_subprocess(build_cmd, ROOT, "build-dubbed-audio")
         if build_result.returncode != 0 or not dubbed_audio.is_file():
             raise RuntimeError(f"dubbed audio build failed: {build_result.stderr[-1500:]}")
@@ -304,8 +329,22 @@ def main() -> int:
             raise RuntimeError(f"remux failed: {remux_result.stderr[-1500:]}")
 
         final_duration = ffprobe_duration(output_video)
+
+        # --- Write review_segments.json + remux_command.json ---
+        # These artifacts make regenerate_segment.py --remux work on this job.
+        queue_file = latest_queue(started)
+        srt_file = latest_srt(started)
+        _write_review_file(
+            review_path, queue_file, stable_manifest, srt_file, job_dir, generated_audio
+        )
+        _write_remux_command(
+            remux_path, input_video, dubbed_audio, output_video, stable_manifest
+        )
+
         report["status"] = "pass"
         report["final_duration_seconds"] = final_duration
+        report["review_segments"] = review_path.as_posix()
+        report["remux_command"] = remux_path.as_posix()
         write_json(report_path, report)
         print()
         print("run_personal_dub: PASS")
@@ -313,6 +352,8 @@ def main() -> int:
         print(f"Duration: {final_duration:.3f}s")
         print(f"Segments: {report['segments_ok']} ok / {report['segments_total']} total")
         print(f"Report: {report_path}")
+        print(f"Review: {review_path}")
+        print(f"Remux command: {remux_path}")
         return 0
     except Exception as exc:
         report["error"] = str(exc)

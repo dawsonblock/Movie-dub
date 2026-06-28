@@ -12,6 +12,8 @@ import argparse
 import json
 import math
 import os
+import re
+import shutil
 import sys
 import time
 import traceback
@@ -225,11 +227,23 @@ def synthesize_segments(args: argparse.Namespace) -> int:
         segment_id = item.get("line", item.get("id", index + 1))
         text = str(item.get("text") or item.get("target_text") or "").strip()
         output_audio = item.get("openvoice_output") or item.get("output_audio") or item.get("filename")
+        start_s, end_s = segment_times_seconds(item)
+        target_duration = None
+        if start_s is not None and end_s is not None:
+            target_duration = max(0.0, end_s - start_s)
         result = {
             "index": index,
             "id": segment_id,
+            "text": text,
+            "speaker": item.get("role", "clone"),
+            "language": language,
+            "start": start_s if start_s is not None else 0.0,
+            "end": end_s if end_s is not None else 0.0,
+            "target_duration": target_duration,
             "output_audio": output_audio,
+            "reference_voice": item.get("ref_wav") or item.get("voice_reference") or args.default_reference,
             "status": "pending",
+            "error": None,
         }
         if not text:
             result["status"] = "skipped_empty_text"
@@ -284,11 +298,16 @@ def synthesize_segments(args: argparse.Namespace) -> int:
                 )
 
             generated = wav_duration(output_path.as_posix())
-            target_duration = None
-            start_s, end_s = segment_times_seconds(item)
-            if start_s is not None and end_s is not None:
-                target_duration = max(0.0, end_s - start_s)
             ratio, timing = duration_status(generated, target_duration)
+
+            preserved_audio = ""
+            if args.preserve_dir:
+                preserve_dir = Path(args.preserve_dir).expanduser().resolve()
+                preserve_dir.mkdir(parents=True, exist_ok=True)
+                safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(segment_id)).strip("_") or "segment"
+                preserved_path = preserve_dir / f"{int(index) + 1:06d}-{safe_id}.wav"
+                shutil.copy2(output_path.as_posix(), preserved_path.as_posix())
+                preserved_audio = preserved_path.as_posix()
 
             result.update(
                 {
@@ -296,9 +315,9 @@ def synthesize_segments(args: argparse.Namespace) -> int:
                     "reference_audio": ref,
                     "device": device,
                     "generated_duration": generated,
-                    "target_duration": target_duration,
                     "duration_ratio": None if ratio is None or math.isnan(ratio) else ratio,
                     "timing_status": timing,
+                    "preserved_audio": preserved_audio,
                 }
             )
             ok += 1
@@ -310,16 +329,19 @@ def synthesize_segments(args: argparse.Namespace) -> int:
         results.append(result)
 
     manifest = {
+        "status": "ok" if ok > 0 and err == 0 else ("partial" if ok > 0 else "error"),
         "created_at": time.time(),
         "ok": ok,
         "error": err,
         "skipped": skipped,
         "skipped_empty_text": skipped,
+        "allow_partial": False,
         "language": language,
         "base_speaker": base_speaker,
         "device": device,
-        "fallback_reason": fallback_reason,
+        "fallback_reason": fallback_reason or None,
         "results": results,
+        "segments": results,
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     write_log(args.logs_file, f"OpenVoice finished: ok={ok}, error={err}, skipped={skipped}")
@@ -340,6 +362,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--logs-file", default="")
     parser.add_argument("--watermark", default="@MyShell")
+    parser.add_argument("--preserve-dir", default="", help="directory to copy each segment WAV for stable rebuild access")
     return parser
 
 

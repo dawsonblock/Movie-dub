@@ -91,6 +91,7 @@ def test_empty_text_segment_is_counted_as_skipped(tmp_path, monkeypatch):
         device="cpu",
         logs_file="",
         watermark="@MyShell",
+        preserve_dir="",
     )
 
     assert openvoice_segment_tts.synthesize_segments(args) == 3

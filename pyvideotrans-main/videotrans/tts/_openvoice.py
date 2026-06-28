@@ -85,6 +85,7 @@ class OpenVoiceTTS(BaseTTS):
         self.openvoice_device = str(settings.get("openvoice_device", "auto") or "auto").strip()
         self.allow_partial = bool(settings.get("openvoice_allow_partial", False))
         self.bridge_script = _setting_path("openvoice_bridge_script", workspace / "bridge" / "openvoice_segment_tts.py")
+        self.preserve_dir = str(settings.get("openvoice_preserve_dir", "") or "").strip()
 
     def _validate_paths(self):
         missing = []
@@ -151,6 +152,8 @@ class OpenVoiceTTS(BaseTTS):
         ]
         if self.default_reference:
             cmd.extend(["--default-reference", self.default_reference])
+        if self.preserve_dir:
+            cmd.extend(["--preserve-dir", self.preserve_dir])
         if self.is_cuda:
             cmd.extend(["--device", "cuda:0"])
         elif self.openvoice_device:

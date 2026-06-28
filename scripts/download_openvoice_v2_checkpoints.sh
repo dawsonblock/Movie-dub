@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OPENVOICE_DIR="$ROOT_DIR/OpenVoice-main"
 REPO_ID="${OPENVOICE_HF_REPO:-rsxdalv/OpenVoiceV2}"
+REVISION="${OPENVOICE_HF_REVISION:-main}"
 
 mkdir -p "$OPENVOICE_DIR"
 
@@ -20,6 +21,29 @@ required=(
   "$OPENVOICE_DIR/checkpoints_v2/base_speakers/ses/zh.pth"
 )
 
+# check_real_file PATH MIN_SIZE
+# Rejects missing files, suspiciously small files, and Git LFS/Xet pointer stubs.
+check_real_file() {
+  local path="$1"
+  local min_size="$2"
+  if [ ! -f "$path" ]; then
+    echo "MISSING: $path"
+    return 1
+  fi
+  local size
+  size="$(stat -f%z "$path" 2>/dev/null || stat -c%s "$path")"
+  if [ "$size" -lt "$min_size" ]; then
+    echo "BAD: $path is too small: $size bytes"
+    echo "This may be a Git LFS/Xet pointer instead of the real file."
+    return 1
+  fi
+  if head -n 1 "$path" | grep -q "version https://git-lfs.github.com/spec"; then
+    echo "BAD: $path is a Git LFS pointer, not the real file."
+    return 1
+  fi
+  echo "OK: $path"
+}
+
 verify_checkpoints() {
   local quiet="${1:-}"
   for path in "${required[@]}"; do
@@ -27,26 +51,25 @@ verify_checkpoints() {
       [ "$quiet" = "--quiet" ] || echo "MISSING: $path"
       return 1
     fi
-    [ "$quiet" = "--quiet" ] || echo "OK: $path"
   done
 
-  local checkpoint="$OPENVOICE_DIR/checkpoints_v2/converter/checkpoint.pth"
-  local checkpoint_size
-  checkpoint_size="$(stat -f%z "$checkpoint" 2>/dev/null || stat -c%s "$checkpoint")"
-  if [ "$checkpoint_size" -lt 100000000 ]; then
-    [ "$quiet" = "--quiet" ] || echo "BAD: converter checkpoint is too small: $checkpoint_size bytes"
+  # Validate every .pth is a real file, not a pointer stub.
+  # converter checkpoint is ~131 MB; base speaker embeddings are small but real.
+  if ! check_real_file "$OPENVOICE_DIR/checkpoints_v2/converter/checkpoint.pth" 100000000; then
     [ "$quiet" = "--quiet" ] || echo "This probably means you downloaded a Git LFS/Xet pointer instead of the real checkpoint."
     return 1
   fi
+  for ses in en-default en-newest en-us es fr jp kr zh; do
+    if ! check_real_file "$OPENVOICE_DIR/checkpoints_v2/base_speakers/ses/$ses.pth" 1000; then
+      return 1
+    fi
+  done
 
-  if LC_ALL=C head -c 200 "$checkpoint" | grep -q "version https://git-lfs.github.com/spec"; then
-    [ "$quiet" = "--quiet" ] || echo "BAD: converter checkpoint is a Git LFS pointer, not the real file."
-    return 1
-  fi
+  [ "$quiet" = "--quiet" ] || echo "All OpenVoice V2 checkpoint files verified."
 }
 
 echo "Downloading OpenVoice V2 checkpoints"
-echo "Repo: $REPO_ID"
+echo "Repo: $REPO_ID (revision: $REVISION)"
 echo "Destination: $OPENVOICE_DIR"
 
 if verify_checkpoints --quiet; then
@@ -61,17 +84,19 @@ fi
 
 if command -v uvx >/dev/null 2>&1; then
   uvx hf download "$REPO_ID" \
+    --revision "$REVISION" \
     --local-dir "$OPENVOICE_DIR" \
     --include "checkpoints_v2/*"
 elif command -v hf >/dev/null 2>&1; then
   hf download "$REPO_ID" \
+    --revision "$REVISION" \
     --local-dir "$OPENVOICE_DIR" \
     --include "checkpoints_v2/*"
 else
   echo "Neither uvx nor hf was found."
   echo "Install uv first, or install huggingface_hub:"
   echo "  brew install uv"
-  echo "  uvx hf download $REPO_ID --local-dir $OPENVOICE_DIR --include 'checkpoints_v2/*'"
+  echo "  uvx hf download $REPO_ID --revision $REVISION --local-dir $OPENVOICE_DIR --include 'checkpoints_v2/*'"
   echo "  python3 -m pip install -U huggingface_hub"
   exit 1
 fi

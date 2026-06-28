@@ -100,11 +100,35 @@ def command_check(section: str, name: str, cmd: list[str], required: bool = True
     return check(section, name, ok, detail, required)
 
 
-def git_xet_check(required: bool = True) -> Check:
+def git_xet_check(required: bool = False) -> Check:
     if shutil.which("git-xet"):
         return check("Checkpoints", "git-xet", True, shutil.which("git-xet") or "git-xet", required)
     ok, detail = run(["git", "xet", "--help"], timeout=15)
     return check("Checkpoints", "git-xet", ok, detail if ok else "git xet not installed", required)
+
+
+def uvx_check() -> Check:
+    found = shutil.which("uvx")
+    if not found:
+        return check("Checkpoints", "uvx", False, "uvx not found on PATH", required=False)
+    return check("Checkpoints", "uvx", True, found, required=False)
+
+
+def hf_cli_check(required: bool) -> Check:
+    return command_check("Checkpoints", "hf CLI", ["hf", "--help"], required=required)
+
+
+def download_tools_status() -> dict:
+    """Report which HuggingFace download tools are available."""
+    uvx_ok = bool(shutil.which("uvx"))
+    hf_ok = bool(shutil.which("hf"))
+    git_xet_ok = bool(shutil.which("git-xet")) or run(["git", "xet", "--help"], timeout=15)[0]
+    return {
+        "uvx": uvx_ok,
+        "hf": hf_ok,
+        "git_xet": git_xet_ok,
+        "can_download_hf": uvx_ok or hf_ok,
+    }
 
 
 def python310_binary_check() -> Check:
@@ -205,8 +229,16 @@ def collect_checks() -> list[Check]:
         import_check("OpenVoice", ov_python, "melo", cwd=OPENVOICE),
         import_check("OpenVoice", ov_python, "soundfile", cwd=OPENVOICE),
         import_check("OpenVoice", ov_python, "unidic", cwd=OPENVOICE),
-        command_check("Checkpoints", "hf CLI", ["hf", "--help"], required=checkpoint_tools_required),
-        git_xet_check(required=checkpoint_tools_required),
+        uvx_check(),
+        hf_cli_check(required=checkpoint_tools_required and not shutil.which("uvx")),
+        git_xet_check(required=False),
+        check(
+            "Checkpoints",
+            "Hugging Face downloader",
+            bool(shutil.which("uvx") or shutil.which("hf")),
+            "uvx available" if shutil.which("uvx") else ("hf available" if shutil.which("hf") else "none"),
+            required=checkpoint_tools_required,
+        ),
         check(
             "Checkpoints",
             "Hugging Face repo",
@@ -234,6 +266,7 @@ def summarize(checks: list[Check], strict: bool = False) -> dict:
         "ready": ready,
         "required_failures": len(required_failures),
         "optional_warnings": len(optional_warnings),
+        "download_tools": download_tools_status(),
         "checks": [asdict(item) for item in checks],
     }
 
@@ -256,6 +289,9 @@ def print_checkpoint_instructions() -> None:
     print("  uvx hf download rsxdalv/OpenVoiceV2 --local-dir OpenVoice-main --include 'checkpoints_v2/*'")
     print("Or install the Hugging Face CLI from huggingface_hub:")
     print("  python3 -m pip install -U huggingface_hub")
+    print()
+    print("WARNING: only use trusted OpenVoice checkpoints. torch.load can execute")
+    print("unsafe pickle data, so never load checkpoints from untrusted sources.")
 
 
 def print_table(checks: list[Check]) -> None:

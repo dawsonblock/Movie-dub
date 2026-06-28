@@ -20,6 +20,14 @@ OUTPUT_DIR = JOB_DIR / "output"
 REPORT_PATH = JOB_DIR / "report.json"
 REVIEW_PATH = JOB_DIR / "review_segments.json"
 REMUX_PATH = JOB_DIR / "remux_command.json"
+DUBBED_AUDIO_PATH = JOB_DIR / "dubbed_audio.wav"
+FINAL_VIDEO_PATH = JOB_DIR / "final_dubbed.mp4"
+STABLE_MANIFEST_PATH = JOB_DIR / "openvoice_manifest.json"
+GENERATED_AUDIO_DIR = JOB_DIR / "generated_audio"
+BUILD_AUDIO_SCRIPT = ROOT / "scripts" / "build_dubbed_audio_from_manifest.py"
+REMUX_SCRIPT = ROOT / "scripts" / "remux_dubbed_video.py"
+PYVT_CONFIG = PYVIDEOTRANS / "videotrans" / "cfg.json"
+PRESERVE_KEY = "openvoice_preserve_dir"
 
 
 def local_ffprobe() -> str:
@@ -113,10 +121,90 @@ def write_report(report: dict) -> None:
     REPORT_PATH.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def write_remux_command(final_video: Path) -> None:
-    relative_video = final_video.relative_to(JOB_DIR) if final_video.is_relative_to(JOB_DIR) else final_video
-    command = ["/bin/cp", relative_video.as_posix(), "final_dubbed.mp4"]
+def write_remux_command() -> None:
+    """Write the real build-audio + remux commands so regeneration can replay them."""
+    command = {
+        "command": [
+            sys.executable,
+            REMUX_SCRIPT.as_posix(),
+            "--input-video",
+            INPUT_VIDEO.as_posix(),
+            "--dubbed-audio",
+            DUBBED_AUDIO_PATH.as_posix(),
+            "--output-video",
+            FINAL_VIDEO_PATH.as_posix(),
+        ],
+        "build_audio_command": [
+            sys.executable,
+            BUILD_AUDIO_SCRIPT.as_posix(),
+            "--manifest",
+            STABLE_MANIFEST_PATH.as_posix(),
+            "--input-video",
+            INPUT_VIDEO.as_posix(),
+            "--output-audio",
+            DUBBED_AUDIO_PATH.as_posix(),
+        ],
+    }
     REMUX_PATH.write_text(json.dumps(command, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def run_build_dubbed_audio() -> tuple[bool, str]:
+    cmd = [
+        sys.executable,
+        BUILD_AUDIO_SCRIPT.as_posix(),
+        "--manifest",
+        STABLE_MANIFEST_PATH.as_posix(),
+        "--input-video",
+        INPUT_VIDEO.as_posix(),
+        "--output-audio",
+        DUBBED_AUDIO_PATH.as_posix(),
+    ]
+    result = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True)
+    return result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+
+
+def run_remux_dubbed_video() -> tuple[bool, str]:
+    cmd = [
+        sys.executable,
+        REMUX_SCRIPT.as_posix(),
+        "--input-video",
+        INPUT_VIDEO.as_posix(),
+        "--dubbed-audio",
+        DUBBED_AUDIO_PATH.as_posix(),
+        "--output-video",
+        FINAL_VIDEO_PATH.as_posix(),
+    ]
+    result = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True)
+    return result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+
+
+def set_preserve_dir() -> str | None:
+    """Point OpenVoice segment WAV preservation at the job's generated_audio dir.
+
+    Returns the previous value so it can be restored after the run.
+    """
+    if not PYVT_CONFIG.is_file():
+        return None
+    try:
+        cfg = json.loads(PYVT_CONFIG.read_text(encoding="utf-8"))
+    except Exception:
+        cfg = {}
+    previous = cfg.get(PRESERVE_KEY, "")
+    GENERATED_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    cfg[PRESERVE_KEY] = GENERATED_AUDIO_DIR.as_posix()
+    PYVT_CONFIG.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    return previous
+
+
+def restore_preserve_dir(previous: str | None) -> None:
+    if previous is None or not PYVT_CONFIG.is_file():
+        return
+    try:
+        cfg = json.loads(PYVT_CONFIG.read_text(encoding="utf-8"))
+    except Exception:
+        cfg = {}
+    cfg[PRESERVE_KEY] = previous
+    PYVT_CONFIG.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def write_review_file(queue_file: Path | None, manifest_file: Path | None, srt_file: Path) -> None:
@@ -173,11 +261,13 @@ def write_review_file(queue_file: Path | None, manifest_file: Path | None, srt_f
                 "device": manifest.get("device", "auto"),
             }
         )
-        original_audio = Path(str(result.get("output_audio", "")))
+        original_audio = Path(str(result.get("preserved_audio") or result.get("output_audio", "")))
         if original_audio.is_file():
             target_audio = Path(review[-1]["output_audio"])
             target_audio.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(original_audio, target_audio)
+        elif result.get("preserved_audio"):
+            review[-1]["output_audio"] = result.get("preserved_audio")
     write_json = json.dumps(review, ensure_ascii=False, indent=2)
     REVIEW_PATH.write_text(write_json, encoding="utf-8")
 
@@ -196,6 +286,7 @@ def main() -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     started = time.time()
+    previous_preserve = set_preserve_dir()
     cmd = [
         py_python.as_posix(),
         "cli.py",
@@ -223,24 +314,30 @@ def main() -> int:
         "--verbose",
     ]
     result = subprocess.run(cmd, cwd=PYVIDEOTRANS, text=True, capture_output=True)
+    restore_preserve_dir(previous_preserve)
     final_video = newest_mp4(OUTPUT_DIR, started) or OUTPUT_DIR / INPUT_VIDEO.name
     manifest = latest_manifest(started)
     queue_file = latest_queue(started)
-    stable_manifest = JOB_DIR / "openvoice_manifest.json"
     if not manifest:
         extracted_manifest = extract_manifest_from_output(f"{result.stdout}\n{result.stderr}")
         if extracted_manifest:
             write_json = json.dumps(extracted_manifest, ensure_ascii=False, indent=2)
-            stable_manifest.write_text(write_json, encoding="utf-8")
-            manifest = stable_manifest
+            STABLE_MANIFEST_PATH.write_text(write_json, encoding="utf-8")
+            manifest = STABLE_MANIFEST_PATH
+    elif manifest.is_file() and manifest != STABLE_MANIFEST_PATH:
+        shutil.copy2(manifest, STABLE_MANIFEST_PATH)
+        manifest = STABLE_MANIFEST_PATH
     report = {
         "status": "fail",
         "input_video": INPUT_VIDEO.as_posix(),
         "output_video": final_video.as_posix(),
+        "final_dubbed_video": FINAL_VIDEO_PATH.as_posix(),
+        "dubbed_audio": DUBBED_AUDIO_PATH.as_posix(),
         "segments_total": 0,
         "segments_ok": 0,
         "segments_failed": 0,
         "duration_seconds": 0.0,
+        "final_duration_seconds": 0.0,
         "tts_backend": "openvoice",
         "device": "",
         "manifest": manifest.as_posix() if manifest else "",
@@ -274,15 +371,29 @@ def main() -> int:
         if report["segments_ok"] < 1:
             raise RuntimeError("OpenVoice manifest has no successful segment")
         write_review_file(queue_file, manifest, OUTPUT_DIR / "en.srt")
-        write_remux_command(final_video)
+        write_remux_command()
+        # Build the real dubbed audio track from the manifest.
+        audio_ok, audio_log = run_build_dubbed_audio()
+        if not audio_ok or not DUBBED_AUDIO_PATH.is_file():
+            raise RuntimeError(f"dubbed audio build failed: {audio_log[-1500:]}")
+        # Remux the dubbed audio into a final MP4.
+        remux_ok, remux_log = run_remux_dubbed_video()
+        if not remux_ok or not FINAL_VIDEO_PATH.is_file():
+            raise RuntimeError(f"remux failed: {remux_log[-1500:]}")
+        final_duration = ffprobe_duration(FINAL_VIDEO_PATH)
+        if final_duration <= 0:
+            raise RuntimeError(f"invalid final dubbed duration: {final_duration}")
         report["status"] = "pass"
         report["duration_seconds"] = duration
+        report["final_duration_seconds"] = final_duration
         write_report(report)
         print("E2E short clip smoke: PASS")
-        print(f"Output video: {final_video}")
+        print(f"pyVideoTrans output: {final_video}")
+        print(f"Final dubbed video: {FINAL_VIDEO_PATH}")
+        print(f"Dubbed audio: {DUBBED_AUDIO_PATH}")
         print(f"Report: {REPORT_PATH}")
         print(f"Manifest: {manifest}")
-        print(f"Duration: {duration:.3f}s")
+        print(f"Duration: {duration:.3f}s  Final: {final_duration:.3f}s")
         return 0
     except Exception as exc:
         report["error"] = str(exc)

@@ -53,6 +53,8 @@ try:
     print("torch:", torch.__version__)
 except Exception as e:
     raise SystemExit(f"torch import failed: {e}")
+mps_available = getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()
+print("MPS available:", bool(mps_available))
 try:
     import openvoice
     print("openvoice: OK")

@@ -467,6 +467,7 @@ class AppSettings:
             "openvoice_bridge_script": str(Path(ROOT_DIR).resolve().parent / "bridge" / "openvoice_segment_tts.py"),
             "openvoice_device": "auto",
             "openvoice_allow_partial": False,
+            "openvoice_preserve_dir": "",
             "proxy": ""
         }
 

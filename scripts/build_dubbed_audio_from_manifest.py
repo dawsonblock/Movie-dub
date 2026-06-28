@@ -601,6 +601,8 @@ def main() -> int:
                         help="raise an error if background audio "
                              "mixing fails instead of silently "
                              "producing speech-only output")
+    parser.add_argument("--report-json", default="",
+                        help="write the build report as JSON to this path")
     args = parser.parse_args()
 
     manifest_path = Path(args.manifest).expanduser().resolve()
@@ -643,6 +645,14 @@ def main() -> int:
         if args.target_lufs is not None:
             status = "applied" if report.get("lufs_applied") else "failed"
             print(f"LUFS: {args.target_lufs} ({status})")
+        if args.report_json:
+            report_path = Path(args.report_json).expanduser().resolve()
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            print(f"Report: {report_path}")
         return 0
     except Exception as exc:
         print("Build dubbed audio: FAIL", file=sys.stderr)

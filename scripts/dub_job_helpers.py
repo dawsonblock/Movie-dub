@@ -69,12 +69,62 @@ def write_remux_command(
     dubbed_audio: Path,
     output_video: Path,
     manifest_path: Path,
+    audio_options: dict | None = None,
 ) -> None:
     """Write remux_command.json with real build-audio + remux commands.
 
     This dict format is consumed by regenerate_segment.py --remux to replay
     the audio rebuild and video remux after a segment is regenerated.
+
+    If audio_options is provided, those settings are included in the
+    build_audio_command so regeneration uses the same audio-quality
+    settings as the initial dub.
     """
+    build_cmd = [
+        sys.executable,
+        BUILD_AUDIO_SCRIPT.as_posix(),
+        "--manifest",
+        manifest_path.as_posix(),
+        "--input-video",
+        input_video.as_posix(),
+        "--output-audio",
+        dubbed_audio.as_posix(),
+    ]
+    if audio_options:
+        if audio_options.get("background_volume", 0) > 0:
+            build_cmd.extend(
+                ["--background-volume", str(audio_options["background_volume"])]
+            )
+        if audio_options.get("voice_volume", 1.0) != 1.0:
+            build_cmd.extend(
+                ["--voice-volume", str(audio_options["voice_volume"])]
+            )
+        if audio_options.get("final_gain", 1.0) != 1.0:
+            build_cmd.extend(
+                ["--final-gain", str(audio_options["final_gain"])]
+            )
+        if audio_options.get("no_normalize"):
+            build_cmd.append("--no-normalize")
+        if audio_options.get("vocal_separation"):
+            build_cmd.append("--vocal-separation")
+        if audio_options.get("ducking"):
+            build_cmd.append("--ducking")
+        if audio_options.get("target_lufs") is not None:
+            build_cmd.extend(
+                ["--target-lufs", str(audio_options["target_lufs"])]
+            )
+        if audio_options.get("background_timeout", 300) != 300:
+            build_cmd.extend(
+                ["--background-timeout",
+                 str(audio_options["background_timeout"])]
+            )
+        if audio_options.get("lufs_timeout", 600) != 600:
+            build_cmd.extend(
+                ["--lufs-timeout", str(audio_options["lufs_timeout"])]
+            )
+        if audio_options.get("fail_if_background_mix_fails"):
+            build_cmd.append("--fail-if-background-mix-fails")
+
     command = {
         "command": [
             sys.executable,
@@ -86,19 +136,14 @@ def write_remux_command(
             "--output-video",
             output_video.as_posix(),
         ],
-        "build_audio_command": [
-            sys.executable,
-            BUILD_AUDIO_SCRIPT.as_posix(),
-            "--manifest",
-            manifest_path.as_posix(),
-            "--input-video",
-            input_video.as_posix(),
-            "--output-audio",
-            dubbed_audio.as_posix(),
-        ],
+        "build_audio_command": build_cmd,
+        "audio_options": audio_options or {},
     }
     remux_path.parent.mkdir(parents=True, exist_ok=True)
-    remux_path.write_text(json.dumps(command, ensure_ascii=False, indent=2), encoding="utf-8")
+    remux_path.write_text(
+        json.dumps(command, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def write_review_file(

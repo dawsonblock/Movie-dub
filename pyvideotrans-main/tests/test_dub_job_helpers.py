@@ -233,3 +233,78 @@ def test_write_review_file_preserves_manifest_text_without_srt(tmp_path):
     review = json.loads(review_path.read_text(encoding="utf-8"))
     assert len(review) == 1
     assert review[0]["translated_text"] == "Hello from the manifest"
+
+
+def test_write_remux_command_preserves_audio_options(tmp_path):
+    """remux_command.json must include audio-quality flags in build_audio_command."""
+    job_dir = tmp_path / "job"
+    remux_path = job_dir / "remux_command.json"
+    input_video = TEST_VIDEO
+    dubbed_audio = job_dir / "dubbed_audio.wav"
+    output_video = job_dir / "final_dubbed.mp4"
+    manifest_path = job_dir / "openvoice_manifest.json"
+
+    audio_options = {
+        "background_volume": 0.15,
+        "voice_volume": 1.2,
+        "final_gain": 0.9,
+        "no_normalize": False,
+        "vocal_separation": True,
+        "ducking": True,
+        "target_lufs": -16.0,
+        "background_timeout": 600,
+        "lufs_timeout": 900,
+        "fail_if_background_mix_fails": True,
+    }
+
+    dub_job_helpers.write_remux_command(
+        remux_path, input_video, dubbed_audio, output_video,
+        manifest_path, audio_options=audio_options,
+    )
+
+    cmd = json.loads(remux_path.read_text(encoding="utf-8"))
+    build_cmd = cmd["build_audio_command"]
+    build_str = " ".join(str(p) for p in build_cmd)
+
+    # Verify each audio option appears in the build command
+    assert "--background-volume" in build_str
+    assert "0.15" in build_str
+    assert "--voice-volume" in build_str
+    assert "1.2" in build_str
+    assert "--final-gain" in build_str
+    assert "0.9" in build_str
+    assert "--vocal-separation" in build_str
+    assert "--ducking" in build_str
+    assert "--target-lufs" in build_str
+    assert "-16.0" in build_str or "-16" in build_str
+    assert "--background-timeout" in build_str
+    assert "600" in build_str
+    assert "--lufs-timeout" in build_str
+    assert "900" in build_str
+    assert "--fail-if-background-mix-fails" in build_str
+
+    # audio_options should be stored in the remux command
+    assert cmd["audio_options"]["background_volume"] == 0.15
+    assert cmd["audio_options"]["ducking"] is True
+
+
+def test_write_remux_command_without_audio_options(tmp_path):
+    """remux_command.json without audio_options should still work."""
+    job_dir = tmp_path / "job"
+    remux_path = job_dir / "remux_command.json"
+    input_video = TEST_VIDEO
+    dubbed_audio = job_dir / "dubbed_audio.wav"
+    output_video = job_dir / "final_dubbed.mp4"
+    manifest_path = job_dir / "openvoice_manifest.json"
+
+    dub_job_helpers.write_remux_command(
+        remux_path, input_video, dubbed_audio, output_video, manifest_path
+    )
+
+    cmd = json.loads(remux_path.read_text(encoding="utf-8"))
+    assert "build_audio_command" in cmd
+    assert cmd["audio_options"] == {}
+    # No audio quality flags in build command
+    build_str = " ".join(str(p) for p in cmd["build_audio_command"])
+    assert "--background-volume" not in build_str
+    assert "--ducking" not in build_str

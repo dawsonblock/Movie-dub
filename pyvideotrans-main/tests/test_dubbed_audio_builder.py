@@ -487,3 +487,28 @@ def test_vocal_separation_ducking_lufs_combined(tmp_path):
     assert report["vocal_separation"] is True
     assert report["ducking"] is True
     assert output_audio.is_file()
+
+
+def test_report_includes_warnings_list(tmp_path):
+    """The build report should always include a warnings list (even if empty)."""
+    gen = tmp_path / "generated_audio"
+    _write_tone_wav(gen / "000001.wav", 1.0)
+    manifest = {
+        "ok": 1, "error": 0, "skipped": 0,
+        "segments": [
+            {"id": 1, "status": "ok", "start": 0.0, "end": 1.0,
+             "output_audio": (gen / "000001.wav").as_posix()},
+        ],
+    }
+    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    output_audio = tmp_path / "dubbed_audio.wav"
+
+    report = build_dubbed_audio_from_manifest.build_dubbed_audio(
+        manifest_path, TEST_VIDEO, output_audio
+    )
+
+    assert "warnings" in report
+    assert isinstance(report["warnings"], list)
+    # No warnings for a simple build with no background/LUFS
+    assert len(report["warnings"]) == 0

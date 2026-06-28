@@ -4,8 +4,12 @@ doctor:
 	python3 scripts/doctor.py
 
 # Run all four pass gates in sequence. All must pass.
+# Note: doctor output is redirected to a file first, then tailed,
+# so the doctor exit code is not masked by the pipe to tail.
 proof:
-	@echo "=== 1/4 doctor ===" && python3 scripts/doctor.py | tail -3
+	@echo "=== 1/4 doctor ==="
+	@python3 scripts/doctor.py > /tmp/movie-dub-doctor.out || { cat /tmp/movie-dub-doctor.out; exit 1; }
+	@tail -3 /tmp/movie-dub-doctor.out
 	@echo "=== 2/4 smoke-openvoice ===" && python3 scripts/smoke_openvoice_bridge.py
 	@echo "=== 3/4 smoke-e2e ===" && python3 scripts/smoke_e2e_short_clip.py
 	@echo "=== 4/4 test-pyvt ===" && cd pyvideotrans-main && .venv/bin/python -m pytest -q
@@ -44,6 +48,7 @@ test-pyvt:
 # Optional: SOURCE=en TARGET=en REFERENCE=voices/openvoice_default_reference.wav
 #           BACKGROUND_VOLUME=0.15 VOICE_VOLUME=1.2 VOCAL_SEPARATION=1
 #           DUCKING=1 TARGET_LUFS=-16 NO_NORMALIZE=1 FINAL_GAIN=1.0
+#           BACKGROUND_TIMEOUT=900 LUFS_TIMEOUT=1200 FAIL_IF_BACKGROUND_MIX_FAILS=1
 dub:
 	@if [ -z "$(INPUT)" ] || [ -z "$(OUTPUT)" ]; then \
 		echo "Usage: make dub INPUT=<input.mp4> OUTPUT=<output.mp4>"; \
@@ -61,4 +66,7 @@ dub:
 		$(if $(NO_NORMALIZE),--no-normalize) \
 		$(if $(VOCAL_SEPARATION),--vocal-separation) \
 		$(if $(DUCKING),--ducking) \
-		$(if $(TARGET_LUFS),--target-lufs $(TARGET_LUFS))
+		$(if $(TARGET_LUFS),--target-lufs $(TARGET_LUFS)) \
+		$(if $(BACKGROUND_TIMEOUT),--background-timeout $(BACKGROUND_TIMEOUT)) \
+		$(if $(LUFS_TIMEOUT),--lufs-timeout $(LUFS_TIMEOUT)) \
+		$(if $(FAIL_IF_BACKGROUND_MIX_FAILS),--fail-if-background-mix-fails)

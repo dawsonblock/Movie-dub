@@ -70,8 +70,17 @@ def write_json(path: Path, data: dict) -> None:
 
 
 def local_ffprobe() -> str:
-    bundled = PYVIDEOTRANS / "ffmpeg" / "ffprobe"
-    return bundled.as_posix() if bundled.is_file() else "ffprobe"
+    """Find ffprobe: prefer bundled, then PATH, then Homebrew locations."""
+    candidates = [
+        PYVIDEOTRANS / "ffmpeg" / "ffprobe",
+        Path(shutil.which("ffprobe") or ""),
+        Path("/opt/homebrew/bin/ffprobe"),
+        Path("/usr/local/bin/ffprobe"),
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.as_posix()
+    raise RuntimeError("ffprobe not found")
 
 
 def ffprobe_duration(path: Path) -> float:
@@ -286,11 +295,13 @@ def main() -> int:
             raise RuntimeError("OpenVoice manifest has no successful segment")
 
         # --- Build dubbed audio from manifest ---
+        build_audio_report = job_dir / "build_audio_report.json"
         build_cmd = [
             sys.executable, BUILD_AUDIO_SCRIPT.as_posix(),
             "--manifest", stable_manifest.as_posix(),
             "--input-video", input_video.as_posix(),
             "--output-audio", dubbed_audio.as_posix(),
+            "--report-json", build_audio_report.as_posix(),
         ]
         if args.allow_partial:
             build_cmd.append("--allow-partial")
@@ -344,8 +355,23 @@ def main() -> int:
         _write_review_file(
             review_path, queue_file, stable_manifest, srt_file, job_dir, generated_audio
         )
+        # Preserve audio-quality settings so regeneration uses the same
+        # flags as the initial dub.
+        audio_options = {
+            "background_volume": args.background_volume,
+            "voice_volume": args.voice_volume,
+            "final_gain": args.final_gain,
+            "no_normalize": args.no_normalize,
+            "vocal_separation": args.vocal_separation,
+            "ducking": args.ducking,
+            "target_lufs": args.target_lufs,
+            "background_timeout": args.background_timeout,
+            "lufs_timeout": args.lufs_timeout,
+            "fail_if_background_mix_fails": args.fail_if_background_mix_fails,
+        }
         _write_remux_command(
-            remux_path, input_video, dubbed_audio, final_video_job, stable_manifest
+            remux_path, input_video, dubbed_audio, final_video_job,
+            stable_manifest, audio_options=audio_options,
         )
 
         report["status"] = "pass"
@@ -354,6 +380,16 @@ def main() -> int:
         report["remux_command"] = remux_path.as_posix()
         report["final_video_job"] = final_video_job.as_posix()
         report["output_video"] = output_video.as_posix()
+        report["build_audio_report"] = build_audio_report.as_posix()
+        # Merge warnings from the build audio report if present
+        if build_audio_report.is_file():
+            try:
+                build_report = read_json(build_audio_report)
+                report["warnings"] = build_report.get("warnings", [])
+            except Exception:
+                report["warnings"] = []
+        else:
+            report["warnings"] = []
         write_json(report_path, report)
         print()
         print("run_personal_dub: PASS")

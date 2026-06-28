@@ -37,31 +37,41 @@ class Check:
     required: bool = True
 
 
-def run(cmd: list[str], cwd: Path | None = None, timeout: int = 45) -> tuple[bool, str]:
+def run(cmd: list[str], cwd: Path | None = None,
+        timeout: int = 45) -> tuple[bool, str]:
     try:
-        result = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, timeout=timeout)
+        result = subprocess.run(
+            cmd, cwd=cwd, text=True, capture_output=True, timeout=timeout
+        )
     except Exception as exc:
         return False, str(exc)
     output = (result.stdout or result.stderr or "").strip()
     return result.returncode == 0, output.splitlines()[-1] if output else "ok"
 
 
-def check(section: str, name: str, ok: bool, detail: str, required: bool = True) -> Check:
+def check(section: str, name: str, ok: bool, detail: str,
+          required: bool = True) -> Check:
     return Check(section, name, ok, detail, required)
 
 
-def file_check(section: str, name: str, path: Path, required: bool = True) -> Check:
+def file_check(section: str, name: str, path: Path,
+               required: bool = True) -> Check:
     return check(section, name, path.is_file(), path.as_posix(), required)
 
 
-def dir_check(section: str, name: str, path: Path, required: bool = True) -> Check:
+def dir_check(section: str, name: str, path: Path,
+              required: bool = True) -> Check:
     return check(section, name, path.is_dir(), path.as_posix(), required)
 
 
-def import_check(section: str, python: Path, module: str, cwd: Path | None = None) -> Check:
+def import_check(section: str, python: Path, module: str,
+                 cwd: Path | None = None) -> Check:
     if not python.is_file():
-        return check(section, f"import {module}", False, f"missing python: {python}")
-    ok, detail = run([python.as_posix(), "-c", f"import {module}; print('ok')"], cwd=cwd)
+        return check(section, f"import {module}", False,
+                     f"missing python: {python}")
+    ok, detail = run(
+        [python.as_posix(), "-c", f"import {module}; print('ok')"], cwd=cwd
+    )
     return check(section, f"import {module}", ok, detail)
 
 
@@ -72,7 +82,8 @@ def python_version_check(section: str, python: Path, name: str) -> Check:
         [
             python.as_posix(),
             "-c",
-            "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')",
+            "import sys; print(f'{sys.version_info.major}."
+            "{sys.version_info.minor}.{sys.version_info.micro}')",
         ]
     )
     if not ok:
@@ -81,14 +92,16 @@ def python_version_check(section: str, python: Path, name: str) -> Check:
     return check(section, name, major_minor == "3.10", detail)
 
 
-def binary_check(section: str, name: str, binary: str, local_path: Path | None = None) -> Check:
+def binary_check(section: str, name: str, binary: str,
+                 local_path: Path | None = None) -> Check:
     found = shutil.which(binary)
     if not found and local_path and local_path.is_file():
         found = local_path.as_posix()
     if not found:
         suffix = f" or {local_path}" if local_path else ""
         return check(section, name, False, f"not found on PATH{suffix}")
-    ok, detail = run([found, "-version"] if name in {"ffmpeg", "ffprobe"} else [found, "--version"])
+    ver_flag = "-version" if name in {"ffmpeg", "ffprobe"} else "--version"
+    ok, detail = run([found, ver_flag])
     return check(section, name, ok, f"{found} ({detail})")
 
 

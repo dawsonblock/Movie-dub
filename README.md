@@ -1,38 +1,91 @@
 # Movie-dub
 
-Local pyVideoTrans + OpenVoice dubbing workflow.
+Personal Mac dubbing workflow using pyVideoTrans for video orchestration and OpenVoice V2 for cloned segment audio.
 
-## What is included
+## Status
 
-- `bridge/openvoice_segment_tts.py`: subprocess bridge that reads pyVideoTrans-style `queue_tts` JSON, generates OpenVoice V2 WAV segments, and writes a timing/status manifest.
-- `pyvideotrans-main/videotrans/tts/_openvoice.py`: pyVideoTrans TTS provider for `OpenVoice V2(Local)`.
-- `pyvideotrans-main/tests/test_openvoice_bridge.py`: focused bridge/config tests.
-- `assets/pyvideotrans_test_clip.mp4`, `assets/test_clip.wav`, and `voices/openvoice_default_reference.wav`: small local smoke-test inputs.
+- Personal-use scaffold: yes
+- One-click app: no
+- Production-ready: no
+- Commercial distribution: license review required because pyVideoTrans is GPLv3
 
-## Local assets not committed
+## What this is
 
-The Python virtual environments, pyVideoTrans model cache, generated output, and OpenVoice checkpoints are intentionally ignored. The validated local paths are:
+This repo keeps the two runtimes isolated:
 
-- pyVideoTrans venv: `pyvideotrans-main/.venv`
-- OpenVoice venv: `OpenVoice-main/.venv`
-- OpenVoice V2 checkpoints: `OpenVoice-main/checkpoints_v2`
+- `pyvideotrans-main`: transcription, translation, subtitles, timing, mixing, export
+- `OpenVoice-main`: local OpenVoice V2 voice conversion and MeloTTS base speech
+- `bridge/openvoice_segment_tts.py`: JSON/WAV subprocess boundary between them
 
-The checkpoint directory must contain at least:
+Do not merge OpenVoice into pyVideoTrans or install both stacks into one venv.
 
-- `OpenVoice-main/checkpoints_v2/converter/config.json`
-- `OpenVoice-main/checkpoints_v2/converter/checkpoint.pth`
+## Requirements
 
-## Smoke checks
+- macOS with Python 3.10
+- local `ffmpeg` and `ffprobe`
+- `pyvideotrans-main/.venv`
+- `OpenVoice-main/.venv`
+- OpenVoice V2 checkpoints in `OpenVoice-main/checkpoints_v2`
 
-```bash
-./scripts/setup_ffmpeg_mac.sh
-./scripts/setup_openvoice_mac.sh
-python3 scripts/doctor.py
-python3 scripts/smoke_openvoice_bridge.py
-python3 -m py_compile bridge/openvoice_segment_tts.py pyvideotrans-main/videotrans/tts/_openvoice.py
-cd pyvideotrans-main
-.venv/bin/python -m pytest tests/test_openvoice_bridge.py -q
-.venv/bin/python cli.py --list providers
+Expected checkpoint layout:
+
+```text
+OpenVoice-main/checkpoints_v2/
+  converter/
+    config.json
+    checkpoint.pth
+  base_speakers/
+    ses/
+      en-default.pth
+      en-newest.pth
+      en-us.pth
+      es.pth
+      fr.pth
+      jp.pth
+      kr.pth
+      zh.pth
 ```
 
-The OpenVoice provider is registered as provider `34`, displayed as `OpenVoice V2(Local)`.
+## Install
+
+```bash
+make setup-ffmpeg
+make setup-pyvt
+make setup-openvoice
+```
+
+Checkpoints are not committed to git. Place them under `OpenVoice-main/checkpoints_v2`, then run:
+
+```bash
+make doctor
+```
+
+## Smoke Tests
+
+```bash
+make smoke-openvoice
+make smoke-e2e
+make test-openvoice
+```
+
+The OpenVoice provider is registered in pyVideoTrans as provider `34`, displayed as `OpenVoice V2(Local)`.
+
+## Run Your Own Short Clip
+
+Use pyVideoTrans CLI with TTS provider `34` after `make doctor` passes. Start with a 1-2 minute clip before trying long videos.
+
+```bash
+cd pyvideotrans-main
+.venv/bin/python cli.py --task vtv --name /absolute/path/input.mp4 \
+  --recogn_type 0 --model_name tiny \
+  --source_language_code en --target_language_code en \
+  --tts_type 34 --voice_role default \
+  --subtitle_type 1 --no-clear-cache --verbose
+```
+
+## Troubleshooting
+
+- `make doctor` is the source of truth for missing local setup.
+- Missing lines are treated as failure by default: `openvoice_allow_partial` defaults to `false`.
+- OpenVoice timing is recorded in each manifest with duration ratios and timing status.
+- Generated outputs, venvs, model caches, checkpoints, and local ffmpeg binaries are intentionally ignored.

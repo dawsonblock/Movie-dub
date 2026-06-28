@@ -80,6 +80,8 @@ class OpenVoiceTTS(BaseTTS):
         self.default_reference = str(settings.get("openvoice_default_reference", "") or "").strip()
         self.openvoice_language = str(settings.get("openvoice_language", "") or "").strip()
         self.openvoice_base_speaker = str(settings.get("openvoice_base_speaker", "") or "").strip()
+        self.openvoice_device = str(settings.get("openvoice_device", "auto") or "auto").strip()
+        self.allow_partial = bool(settings.get("openvoice_allow_partial", False))
         self.bridge_script = _setting_path("openvoice_bridge_script", workspace / "bridge" / "openvoice_segment_tts.py")
 
     def _validate_paths(self):
@@ -149,6 +151,8 @@ class OpenVoiceTTS(BaseTTS):
             cmd.extend(["--default-reference", self.default_reference])
         if self.is_cuda:
             cmd.extend(["--device", "cuda:0"])
+        elif self.openvoice_device:
+            cmd.extend(["--device", self.openvoice_device])
 
         self.signal(text="OpenVoice subprocess starting")
         logger.debug(f"OpenVoice command: {cmd}")
@@ -171,12 +175,16 @@ class OpenVoiceTTS(BaseTTS):
         manifest = _read_manifest(manifest_file)
         if manifest:
             logger.debug(json.dumps(manifest, ensure_ascii=False, indent=2))
+        if result.returncode == 3:
+            raise DubbingSrtError(f"OpenVoice generated no segment audio. Manifest: {manifest_file}")
         if result.returncode not in (0, 2):
             raise DubbingSrtError(f"OpenVoice failed with exit code {result.returncode}: {result.stderr[-2000:]}")
         if result.returncode == 2:
             message = _partial_failure_message(manifest, manifest_file)
             logger.error(message)
             self.signal(text=message)
+            if not self.allow_partial:
+                raise DubbingSrtError(message)
 
         all_task = []
         with ThreadPoolExecutor(max_workers=min(4, len(self.queue_tts), os.cpu_count() or 1)) as pool:
@@ -190,7 +198,7 @@ class OpenVoiceTTS(BaseTTS):
         succeed = len([item for item in self.queue_tts if tools.vail_file(item.get("filename"))])
         if succeed < 1:
             raise DubbingSrtError("OpenVoice generated no usable dubbing audio")
-        if result.returncode == 2:
+        if result.returncode == 2 and not self.allow_partial:
             message = _partial_failure_message(manifest, manifest_file)
             raise DubbingSrtError(message)
         self.signal(text=f"OpenVoice dubbing ended: {succeed}/{len(self.queue_tts)}")

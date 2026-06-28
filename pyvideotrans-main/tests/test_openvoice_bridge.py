@@ -24,6 +24,22 @@ def test_duration_status_buckets():
     assert openvoice_segment_tts.duration_status(0.5, 1.0) == (0.5, "padding_or_slowdown_candidate")
 
 
+def test_start_time_end_time_are_milliseconds():
+    start, end = openvoice_segment_tts.segment_times_seconds({"start_time": 0, "end_time": 800})
+    assert start == 0.0
+    assert end == 0.8
+
+
+def test_start_end_are_seconds():
+    start, end = openvoice_segment_tts.segment_times_seconds({"start": 0, "end": 0.8})
+    assert start == 0.0
+    assert end == 0.8
+
+
+def test_missing_segment_times_are_unknown():
+    assert openvoice_segment_tts.segment_times_seconds({"text": "hello"}) == (None, None)
+
+
 def test_validate_checkpoint_dir_requires_converter_files(tmp_path):
     with pytest.raises(FileNotFoundError):
         openvoice_segment_tts.validate_checkpoint_dir(tmp_path.as_posix())
@@ -34,3 +50,10 @@ def test_validate_checkpoint_dir_requires_converter_files(tmp_path):
     (converter / "checkpoint.pth").write_bytes(b"fake")
 
     assert openvoice_segment_tts.validate_checkpoint_dir(tmp_path.as_posix()) == converter
+
+
+def test_return_code_for_manifest_counts():
+    assert openvoice_segment_tts.return_code_for_counts(1, 0) == 0
+    assert openvoice_segment_tts.return_code_for_counts(1, 1) == 2
+    assert openvoice_segment_tts.return_code_for_counts(0, 0) == 3
+    assert openvoice_segment_tts.return_code_for_counts(0, 1) == 3

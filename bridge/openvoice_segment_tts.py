@@ -62,6 +62,26 @@ def duration_status(generated_duration: float | None, target_duration: float | N
     return ratio, "minor_timing_mismatch"
 
 
+def return_code_for_counts(ok: int, err: int) -> int:
+    if ok > 0 and err == 0:
+        return 0
+    if ok > 0 and err > 0:
+        return 2
+    return 3
+
+
+def segment_times_seconds(item: dict[str, Any]) -> tuple[float, float] | tuple[None, None]:
+    if "start_time" in item or "end_time" in item:
+        start = float(item.get("start_time", 0.0)) / 1000.0
+        end = float(item.get("end_time", 0.0)) / 1000.0
+        return start, end
+    if "start" in item or "end" in item:
+        start = float(item.get("start", 0.0))
+        end = float(item.get("end", 0.0))
+        return start, end
+    return None, None
+
+
 def normalize_language(language: str | None) -> str:
     if not language:
         return "EN"
@@ -262,11 +282,10 @@ def synthesize_segments(args: argparse.Namespace) -> int:
                 )
 
             generated = wav_duration(output_path.as_posix())
-            start = item.get("start_time", item.get("start"))
-            end = item.get("end_time", item.get("end"))
             target_duration = None
-            if start is not None and end is not None:
-                target_duration = max(0.0, (float(end) - float(start)) / (1000.0 if float(end) > 1000 else 1.0))
+            start_s, end_s = segment_times_seconds(item)
+            if start_s is not None and end_s is not None:
+                target_duration = max(0.0, end_s - start_s)
             ratio, timing = duration_status(generated, target_duration)
 
             result.update(
@@ -300,7 +319,7 @@ def synthesize_segments(args: argparse.Namespace) -> int:
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     write_log(args.logs_file, f"OpenVoice finished: ok={ok}, error={err}")
-    return 0 if ok > 0 and err == 0 else 2 if ok > 0 else 1
+    return return_code_for_counts(ok, err)
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -8,6 +8,7 @@ import json
 import subprocess
 import sys
 import time
+import wave
 from pathlib import Path
 
 
@@ -17,7 +18,14 @@ OPENVOICE = ROOT / "OpenVoice-main"
 
 def require_file(path: Path, label: str) -> None:
     if not path.is_file():
-        raise SystemExit(f"Missing {label}: {path}")
+        raise RuntimeError(f"missing {label}: {path}")
+
+
+def wav_duration(path: Path) -> float:
+    with wave.open(path.as_posix(), "rb") as wav:
+        frames = wav.getnframes()
+        rate = wav.getframerate()
+    return frames / float(rate) if rate else 0.0
 
 
 def main() -> int:
@@ -27,20 +35,25 @@ def main() -> int:
     parser.add_argument("--device", default="auto")
     args = parser.parse_args()
 
-    openvoice_python = OPENVOICE / ".venv" / "bin" / "python"
-    bridge = ROOT / "bridge" / "openvoice_segment_tts.py"
-    checkpoint_dir = OPENVOICE / "checkpoints_v2"
-    reference = ROOT / "voices" / "openvoice_default_reference.wav"
+    try:
+        openvoice_python = OPENVOICE / ".venv" / "bin" / "python"
+        bridge = ROOT / "bridge" / "openvoice_segment_tts.py"
+        checkpoint_dir = OPENVOICE / "checkpoints_v2"
+        reference = ROOT / "voices" / "openvoice_default_reference.wav"
 
-    require_file(openvoice_python, "OpenVoice venv python")
-    require_file(bridge, "OpenVoice bridge")
-    require_file(checkpoint_dir / "converter" / "config.json", "OpenVoice converter config")
-    require_file(checkpoint_dir / "converter" / "checkpoint.pth", "OpenVoice converter checkpoint")
-    require_file(reference, "default reference WAV")
+        require_file(openvoice_python, "OpenVoice venv python")
+        require_file(bridge, "OpenVoice bridge")
+        require_file(checkpoint_dir / "converter" / "config.json", "OpenVoice converter config")
+        require_file(checkpoint_dir / "converter" / "checkpoint.pth", "OpenVoice converter checkpoint")
+        require_file(reference, "default reference WAV")
 
-    speaker_dir = checkpoint_dir / "base_speakers" / "ses"
-    if not speaker_dir.is_dir() or not list(speaker_dir.glob("*.pth")):
-        raise SystemExit(f"Missing OpenVoice base speaker embeddings: {speaker_dir}")
+        speaker_dir = checkpoint_dir / "base_speakers" / "ses"
+        if not speaker_dir.is_dir() or not list(speaker_dir.glob("*.pth")):
+            raise RuntimeError(f"missing OpenVoice base speaker embeddings: {speaker_dir}")
+    except Exception as exc:
+        print("OpenVoice bridge smoke: FAIL", file=sys.stderr)
+        print(f"Reason: {exc}", file=sys.stderr)
+        return 1
 
     work_root = ROOT / "pyvideotrans-main" / "tmp" / "openvoice-smoke"
     stamp = str(int(time.time()))
@@ -90,15 +103,25 @@ def main() -> int:
     if result.stderr:
         print(result.stderr, file=sys.stderr)
     if result.returncode != 0:
-        print(f"OpenVoice bridge smoke failed with exit code {result.returncode}", file=sys.stderr)
+        print("OpenVoice bridge smoke: FAIL", file=sys.stderr)
+        print(f"Reason: bridge exited with code {result.returncode}", file=sys.stderr)
         return result.returncode
     manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
     if manifest.get("ok") != 1 or not output_wav.is_file():
-        print(f"OpenVoice bridge smoke did not produce a successful WAV. Manifest: {manifest_file}", file=sys.stderr)
+        print("OpenVoice bridge smoke: FAIL", file=sys.stderr)
+        print(f"Reason: expected one successful WAV. Manifest: {manifest_file}", file=sys.stderr)
+        return 1
+    duration = wav_duration(output_wav)
+    if duration <= 0:
+        print("OpenVoice bridge smoke: FAIL", file=sys.stderr)
+        print(f"Reason: generated WAV has invalid duration: {output_wav}", file=sys.stderr)
         return 1
     timing = manifest["results"][0].get("timing_status", "unknown")
-    print(f"PASS OpenVoice bridge smoke: {output_wav}")
-    print(f"Manifest: {manifest_file}")
+    print("OpenVoice bridge smoke: PASS")
+    print("Generated:")
+    print(f"  {output_wav}")
+    print(f"  {manifest_file}")
+    print(f"Duration: {duration:.3f}s")
     print(f"Timing status: {timing}")
     return 0
 

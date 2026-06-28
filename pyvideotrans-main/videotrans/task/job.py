@@ -7,7 +7,8 @@ from videotrans.configure.config import tr, settings, app_cfg, logger
 from videotrans.configure.excepts import get_msg_from_except
 
 from videotrans.util import gpus
-from videotrans.util.tools import get_recogn_type,get_tanslate_type,get_tts_type,send_notification
+from videotrans.util.help_misc import _get_type_name
+from videotrans.util.tools import get_recogn_type, get_tanslate_type, get_tts_type, send_notification
 
 
 class BaseWorker(QThread):

@@ -115,7 +115,6 @@ def main() -> int:
                     replacement = new_results[0]
                     replaced = False
                     results = manifest.setdefault("results", [])
-                    segs = manifest.setdefault("segments", [])
                     for index, existing in enumerate(results):
                         if str(existing.get("id", existing.get("index", ""))) == str(args.segment_id):
                             results[index] = replacement

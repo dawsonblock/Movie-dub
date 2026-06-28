@@ -113,14 +113,19 @@ def resolve_output_audio(seg: dict, manifest_dir: Path) -> Path | None:
 
 # --- Audio I/O with soundfile/numpy preferred, stdlib fallback ---
 
+_HAVE_SOUNDFILE: bool | None = None
+
 
 def _have_soundfile() -> bool:
-    try:
-        import soundfile  # noqa: F401
-        import numpy  # noqa: F401
-        return True
-    except Exception:
-        return False
+    global _HAVE_SOUNDFILE
+    if _HAVE_SOUNDFILE is None:
+        try:
+            import soundfile  # noqa: F401
+            import numpy  # noqa: F401
+            _HAVE_SOUNDFILE = True
+        except Exception:
+            _HAVE_SOUNDFILE = False
+    return _HAVE_SOUNDFILE
 
 
 def load_audio_samples(path: Path, target_sr: int) -> tuple[list, int] | "object":
@@ -204,7 +209,18 @@ def write_audio_samples(path: Path, samples, sr: int) -> None:
         wav.writeframes(arr.tobytes())
 
 
-def normalize(samples, target_peak: float = 0.97) -> list:
+def normalize(samples, target_peak: float = 0.97):
+    """Normalize peak to target_peak. Returns the same type as input (list or ndarray)."""
+    if _have_soundfile():
+        import numpy as np
+
+        arr = np.asarray(samples, dtype="float32")
+        peak = float(np.abs(arr).max()) if arr.size else 0.0
+        if peak <= 0:
+            return arr
+        gain = target_peak / peak
+        return arr * gain
+
     peak = 0.0
     for v in samples:
         a = abs(float(v))
@@ -213,9 +229,6 @@ def normalize(samples, target_peak: float = 0.97) -> list:
     if peak <= 0:
         return list(samples)
     gain = target_peak / peak
-    if gain >= 1.0:
-        return [float(v) * gain for v in samples]
-    # only attenuate to avoid clipping; do not amplify quiet mixes excessively
     return [float(v) * gain for v in samples]
 
 
@@ -295,9 +308,8 @@ def build_dubbed_audio(
     if placed == 0:
         raise RuntimeError("no segments were placed on the audio canvas")
 
-    canvas_list = canvas.tolist() if _have_soundfile() else canvas
-    canvas_list = normalize(canvas_list)
-    write_audio_samples(output_audio, canvas_list, sample_rate)
+    normalized = normalize(canvas)
+    write_audio_samples(output_audio, normalized, sample_rate)
 
     return {
         "status": "ok",

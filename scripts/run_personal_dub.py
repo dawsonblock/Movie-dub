@@ -188,13 +188,18 @@ def main() -> int:
 
     # --- Configure OpenVoice settings in pyVideoTrans ---
     # Set the reference voice + preserve dir so segment WAVs survive for rebuild.
+    # Track whether we modified the config so we can safely restore it.
+    config_modified = False
     cfg_previous: dict = {}
     if PYVT_CONFIG.is_file():
         try:
             cfg = read_json(PYVT_CONFIG)
+            cfg_previous = dict(cfg)
+            config_modified = True
         except Exception:
             cfg = {}
-        cfg_previous = dict(cfg)
+            cfg_previous = {}
+            config_modified = True
         cfg["openvoice_default_reference"] = reference.as_posix()
         cfg[PRESERVE_KEY] = generated_audio.as_posix()
         write_json(PYVT_CONFIG, cfg)
@@ -216,11 +221,21 @@ def main() -> int:
         "--no-clear-cache",
         "--verbose",
     ]
-    result = run_subprocess(cmd, PYVIDEOTRANS, "pyVideoTrans")
-
-    # Restore the preserve_dir setting so we don't leak it into other runs.
-    if PYVT_CONFIG.is_file():
-        write_json(PYVT_CONFIG, cfg_previous)
+    try:
+        result = run_subprocess(cmd, PYVIDEOTRANS, "pyVideoTrans")
+    finally:
+        # Restore the config so we don't leak preserve_dir into other runs.
+        # Only restore if we actually modified it AND the file still exists.
+        # If pyVideoTrans created/rewrote cfg.json during the run, merge our
+        # previous values back instead of blindly overwriting with a stale snapshot.
+        if config_modified and PYVT_CONFIG.is_file():
+            try:
+                current = read_json(PYVT_CONFIG)
+            except Exception:
+                current = {}
+            current["openvoice_default_reference"] = cfg_previous.get("openvoice_default_reference", "")
+            current[PRESERVE_KEY] = cfg_previous.get(PRESERVE_KEY, "")
+            write_json(PYVT_CONFIG, current)
 
     # --- Locate the OpenVoice manifest ---
     manifest = latest_manifest(started)

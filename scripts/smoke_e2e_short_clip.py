@@ -313,8 +313,10 @@ def main() -> int:
         "--no-clear-cache",
         "--verbose",
     ]
-    result = subprocess.run(cmd, cwd=PYVIDEOTRANS, text=True, capture_output=True)
-    restore_preserve_dir(previous_preserve)
+    try:
+        result = subprocess.run(cmd, cwd=PYVIDEOTRANS, text=True, capture_output=True)
+    finally:
+        restore_preserve_dir(previous_preserve)
     final_video = newest_mp4(OUTPUT_DIR, started) or OUTPUT_DIR / INPUT_VIDEO.name
     manifest = latest_manifest(started)
     queue_file = latest_queue(started)

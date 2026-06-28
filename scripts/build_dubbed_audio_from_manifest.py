@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import shutil
 import subprocess
 import sys
@@ -269,14 +270,14 @@ def _mix_background_audio(
             bg_path = Path(tmp.name)
 
         if vocal_separation:
-            # Extract stereo audio, then remove center channel (vocals)
-            # using FFmpeg's pan filter: L-R, R-L cancels centered vocals
+            # Remove center-channel vocals using FFmpeg's pan filter.
+            # L-R and R-L cancel out centered (mono) vocals, leaving
+            # mostly instrumental content. Downmix to mono afterward.
             cmd = [
                 local_ffmpeg(), "-hide_banner", "-nostdin", "-y",
                 "-i", input_video.as_posix(),
                 "-vn",
-                "-af", "pan=stereo|c0=c0-c1|c1=c1-c0,"
-                       "aformat=channel_layouts=mono",
+                "-af", "pan=stereo|c0=c0-c1|c1=c1-c0",
                 "-ac", "1",
                 "-ar", str(sample_rate),
                 "-f", "wav",
@@ -345,33 +346,42 @@ def _mix_background_audio(
 
 
 def _apply_lufs_normalization(
-    input_wav: Path, output_wav: Path, target_lufs: float = -16.0
+    input_wav: Path, target_lufs: float = -16.0
 ) -> bool:
     """Apply EBU R128 LUFS normalization via FFmpeg loudnorm filter.
 
+    Normalizes input_wav in-place. Returns True if normalization succeeded.
     target_lufs: -16.0 is typical for web/streaming, -23.0 for EBU broadcast.
-    Returns True if normalization succeeded.
     """
     import subprocess
+    import tempfile
 
+    tmp_path: Path | None = None
     try:
+        fd, tmp_name = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+
         cmd = [
             local_ffmpeg(), "-hide_banner", "-nostdin", "-y",
             "-i", input_wav.as_posix(),
             "-af", f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11",
             "-ar", str(DEFAULT_SAMPLE_RATE),
             "-f", "wav",
-            output_wav.as_posix(),
+            tmp_path.as_posix(),
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        if result.returncode != 0:
+        if result.returncode != 0 or not tmp_path.is_file():
             return False
         # Replace the original with the normalized version
-        if output_wav.is_file() and input_wav.is_file():
-            shutil.move(output_wav.as_posix(), input_wav.as_posix())
+        shutil.move(tmp_path.as_posix(), input_wav.as_posix())
+        tmp_path = None  # consumed by move
         return True
     except Exception:
         return False
+    finally:
+        if tmp_path is not None and tmp_path.is_file():
+            tmp_path.unlink(missing_ok=True)
 
 
 def build_dubbed_audio(
@@ -491,11 +501,7 @@ def build_dubbed_audio(
     # Optionally apply EBU R128 LUFS normalization as a post-processing step
     lufs_applied = False
     if target_lufs is not None:
-        import tempfile
-        tmp_normalized = Path(tempfile.mktemp(suffix=".wav"))
-        lufs_applied = _apply_lufs_normalization(
-            output_audio, tmp_normalized, target_lufs
-        )
+        lufs_applied = _apply_lufs_normalization(output_audio, target_lufs)
 
     return {
         "status": "ok",

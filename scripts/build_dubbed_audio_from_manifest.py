@@ -21,6 +21,20 @@ from pathlib import Path
 from typing import Iterable
 
 
+def local_ffmpeg() -> str:
+    """Find ffmpeg: prefer bundled, then PATH, then common Homebrew locations."""
+    candidates = [
+        Path(__file__).resolve().parents[1] / "pyvideotrans-main" / "ffmpeg" / "ffmpeg",
+        Path(shutil.which("ffmpeg") or ""),
+        Path("/opt/homebrew/bin/ffmpeg"),
+        Path("/usr/local/bin/ffmpeg"),
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.as_posix()
+    raise RuntimeError("ffmpeg not found")
+
+
 SUPPORTED_SAMPLE_RATES = (44100, 48000, 24000, 22050, 16000)
 DEFAULT_SAMPLE_RATE = 44100
 
@@ -248,7 +262,7 @@ def _mix_background_audio(
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             bg_path = Path(tmp.name)
         cmd = [
-            "ffmpeg", "-hide_banner", "-nostdin", "-y",
+            local_ffmpeg(), "-hide_banner", "-nostdin", "-y",
             "-i", input_video.as_posix(),
             "-vn",  # no video
             "-ac", "1",  # mono
@@ -309,15 +323,18 @@ def build_dubbed_audio(
     for seg in segments:
         status = seg.get("status", "ok")
         if status not in {"ok", "regenerated"}:
+            # skipped, skipped_empty_text, and error all require --allow-partial
+            # to prevent silent missing lines in the final video
+            msg = f"segment {seg.get('id')} has status '{status}'"
             if status in {"skipped", "skipped_empty_text"}:
                 skipped += 1
-                continue
-            if allow_partial:
+            else:
                 failed += 1
+            if allow_partial:
+                errors.append(msg)
                 continue
             raise RuntimeError(
-                f"segment {seg.get('id')} has status '{status}'; "
-                f"use --allow-partial to skip failed segments"
+                f"{msg}; use --allow-partial to skip failed/skipped segments"
             )
 
         wav_path = resolve_output_audio(seg, manifest_dir)

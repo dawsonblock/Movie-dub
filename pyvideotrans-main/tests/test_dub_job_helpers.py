@@ -199,3 +199,40 @@ def test_write_review_file_handles_none_srt(tmp_path):
     )
     review = json.loads(review_path.read_text(encoding="utf-8"))
     assert len(review) == 2
+
+
+def test_write_review_file_preserves_manifest_text_without_srt(tmp_path):
+    """When no SRT/queue exists, review text must fall back to manifest text."""
+    job_dir = tmp_path / "personal_dub" / "789"
+    gen_dir = job_dir / "generated_audio"
+    gen_dir.mkdir(parents=True, exist_ok=True)
+    _write_tone_wav(gen_dir / "000001-1.wav", 1.0)
+    manifest_data = {
+        "status": "ok", "ok": 1, "error": 0, "skipped": 0,
+        "language": "EN", "device": "mps",
+        "results": [
+            {"id": 1, "status": "ok", "start": 0.0, "end": 1.0,
+             "target_duration": 1.0, "text": "Hello from the manifest",
+             "output_audio": "/tmp/gone/seg1.wav",
+             "preserved_audio": (gen_dir / "000001-1.wav").as_posix(),
+             "timing_status": "accept"},
+        ],
+        "segments": [
+            {"id": 1, "status": "ok", "start": 0.0, "end": 1.0,
+             "text": "Hello from the manifest",
+             "preserved_audio": (gen_dir / "000001-1.wav").as_posix(),
+             "timing_status": "accept"},
+        ],
+    }
+    manifest_path = job_dir / "openvoice_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
+    review_path = job_dir / "review_segments.json"
+
+    # No queue, no SRT — text must come from manifest
+    dub_job_helpers.write_review_file(
+        review_path, None, manifest_path, None, job_dir, gen_dir
+    )
+    review = json.loads(review_path.read_text(encoding="utf-8"))
+    assert len(review) == 1
+    assert review[0]["translated_text"] == "Hello from the manifest"

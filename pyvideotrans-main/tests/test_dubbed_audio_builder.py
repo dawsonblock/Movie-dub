@@ -132,3 +132,69 @@ def test_build_dubbed_audio_supports_legacy_results_key(tmp_path):
 
     assert report["segments_placed"] == 1
     assert output_audio.is_file()
+
+
+def test_skipped_empty_text_fails_without_allow_partial(tmp_path):
+    """skipped_empty_text segments must fail unless --allow-partial is used."""
+    gen = tmp_path / "generated_audio"
+    _write_tone_wav(gen / "000001.wav", 1.0)
+    manifest = {
+        "ok": 1, "error": 0, "skipped": 1,
+        "segments": [
+            {"id": 1, "status": "ok", "start": 0.0, "end": 1.0, "output_audio": (gen / "000001.wav").as_posix()},
+            {"id": 2, "status": "skipped_empty_text", "start": 1.5, "end": 2.5, "output_audio": ""},
+        ],
+    }
+    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    output_audio = tmp_path / "dubbed_audio.wav"
+
+    with pytest.raises(RuntimeError, match="skipped_empty_text"):
+        build_dubbed_audio_from_manifest.build_dubbed_audio(
+            manifest_path, TEST_VIDEO, output_audio
+        )
+
+
+def test_skipped_empty_text_passes_with_allow_partial(tmp_path):
+    """With --allow-partial, skipped_empty_text segments are skipped silently."""
+    gen = tmp_path / "generated_audio"
+    _write_tone_wav(gen / "000001.wav", 1.0)
+    manifest = {
+        "ok": 1, "error": 0, "skipped": 1,
+        "segments": [
+            {"id": 1, "status": "ok", "start": 0.0, "end": 1.0, "output_audio": (gen / "000001.wav").as_posix()},
+            {"id": 2, "status": "skipped_empty_text", "start": 1.5, "end": 2.5, "output_audio": ""},
+        ],
+    }
+    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    output_audio = tmp_path / "dubbed_audio.wav"
+
+    report = build_dubbed_audio_from_manifest.build_dubbed_audio(
+        manifest_path, TEST_VIDEO, output_audio, allow_partial=True
+    )
+
+    assert report["segments_placed"] == 1
+    assert report["segments_skipped"] == 1
+    assert output_audio.is_file()
+
+
+def test_skipped_status_fails_without_allow_partial(tmp_path):
+    """skipped status (not skipped_empty_text) must also fail without --allow-partial."""
+    gen = tmp_path / "generated_audio"
+    _write_tone_wav(gen / "000001.wav", 1.0)
+    manifest = {
+        "ok": 1, "error": 0, "skipped": 1,
+        "segments": [
+            {"id": 1, "status": "ok", "start": 0.0, "end": 1.0, "output_audio": (gen / "000001.wav").as_posix()},
+            {"id": 2, "status": "skipped", "start": 1.5, "end": 2.5, "output_audio": ""},
+        ],
+    }
+    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    output_audio = tmp_path / "dubbed_audio.wav"
+
+    with pytest.raises(RuntimeError, match="status 'skipped'"):
+        build_dubbed_audio_from_manifest.build_dubbed_audio(
+            manifest_path, TEST_VIDEO, output_audio
+        )

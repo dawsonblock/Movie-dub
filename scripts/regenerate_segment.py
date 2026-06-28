@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -157,13 +158,27 @@ def main() -> int:
             else:
                 raise RuntimeError("remux_command.json must contain a command list or dict")
 
+            # Sync the rebuilt job video to the user's requested output path
+            # so the user sees the updated final MP4 without hunting in the job dir.
+            synced_output = ""
+            report_file = job / "report.json"
+            if report_file.is_file():
+                report_data = read_json(report_file)
+                user_output = report_data.get("output_video", "")
+                job_video = report_data.get("final_video_job", str(job / "final_dubbed.mp4"))
+                if user_output and Path(job_video).is_file():
+                    shutil.copy2(job_video, user_output)
+                    synced_output = user_output
+
         print("Regenerate segment: PASS")
         print(f"Segment: {args.segment_id}")
         print(f"Audio: {output_audio}")
         print(f"Manifest: {manifest_file}")
         if args.remux:
-            print(f"Rebuilt: {job / 'dubbed_audio.wav'}")
-            print(f"Rebuilt: {job / 'final_dubbed.mp4'}")
+            print(f"Updated audio: {job / 'dubbed_audio.wav'}")
+            print(f"Updated video: {job / 'final_dubbed.mp4'}")
+            if synced_output:
+                print(f"Synced output: {synced_output}")
         return 0
     except Exception as exc:
         print("Regenerate segment: FAIL", file=sys.stderr)

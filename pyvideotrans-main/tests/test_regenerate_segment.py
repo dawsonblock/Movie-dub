@@ -157,6 +157,68 @@ def test_regenerate_missing_review_file_returns_error(tmp_path, monkeypatch):
     assert rc == 1
 
 
+def test_regenerate_remux_syncs_to_user_output(tmp_path, monkeypatch):
+    """--remux should sync the rebuilt job video to the user output path in report.json."""
+    job = _make_job(tmp_path)
+    user_output = tmp_path / "user_output.mp4"
+    job_video = job / "final_dubbed.mp4"
+
+    # Write report.json with user output path (as run_personal_dub.py does)
+    report = {
+        "status": "pass",
+        "output_video": user_output.as_posix(),
+        "final_video_job": job_video.as_posix(),
+    }
+    (job / "report.json").write_text(json.dumps(report), encoding="utf-8")
+
+    invoked = {"build": 0, "remux": 0}
+
+    def fake_run(cmd, **kwargs):
+        cmd_str = " ".join(str(c) for c in cmd)
+        if "openvoice_segment_tts.py" in cmd_str:
+            queue_idx = cmd.index("--queue-tts-file") + 1
+            manifest_idx = cmd.index("--manifest-file") + 1
+            queue = json.loads(Path(cmd[queue_idx]).read_text(encoding="utf-8"))
+            _write_tone_wav(Path(queue[0]["filename"]), 1.3)
+            regen = {"status": "ok", "ok": 1, "error": 0, "skipped": 0,
+                     "results": [{"id": 1, "status": "ok", "start": 0.0, "end": 1.4,
+                                  "output_audio": queue[0]["filename"],
+                                  "preserved_audio": queue[0]["filename"]}],
+                     "segments": [{"id": 1, "status": "ok", "start": 0.0, "end": 1.4,
+                                   "output_audio": queue[0]["filename"],
+                                   "preserved_audio": queue[0]["filename"]}]}
+            Path(cmd[manifest_idx]).write_text(json.dumps(regen), encoding="utf-8")
+            return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+        if "build_dubbed_audio_from_manifest.py" in cmd_str:
+            invoked["build"] += 1
+            out_idx = cmd.index("--output-audio") + 1
+            _write_tone_wav(Path(cmd[out_idx]), 8.4)
+            return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+        if "remux_dubbed_video.py" in cmd_str:
+            invoked["remux"] += 1
+            out_idx = cmd.index("--output-video") + 1
+            import shutil
+            shutil.copy2(TEST_VIDEO, Path(cmd[out_idx]))
+            return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(regenerate_segment.subprocess, "run", fake_run)
+    monkeypatch.setattr(sys, "argv", [
+        "regenerate_segment.py", "--job-dir", job.as_posix(),
+        "--segment-id", "1", "--text", "Synced regeneration test.", "--remux",
+    ])
+
+    rc = regenerate_segment.main()
+
+    assert rc == 0
+    assert invoked["build"] == 1
+    assert invoked["remux"] == 1
+    # The job video was rebuilt
+    assert job_video.is_file()
+    # The user output path was synced
+    assert user_output.is_file()
+
+
 def test_regenerate_accepts_legacy_job_arg(tmp_path, monkeypatch):
     job = _make_job(tmp_path)
 

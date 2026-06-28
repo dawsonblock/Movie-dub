@@ -162,6 +162,10 @@ def main() -> int:
     stable_manifest = job_dir / "openvoice_manifest.json"
     dubbed_audio = job_dir / "dubbed_audio.wav"
     report_path = job_dir / "report.json"
+    # The canonical final video lives in the job dir so regeneration can
+    # rebuild it without losing the only good copy. We sync to the user's
+    # requested output path after the remux succeeds.
+    final_video_job = job_dir / "final_dubbed.mp4"
     review_path = job_dir / "review_segments.json"
     remux_path = job_dir / "remux_command.json"
 
@@ -278,38 +282,47 @@ def main() -> int:
         if build_result.returncode != 0 or not dubbed_audio.is_file():
             raise RuntimeError(f"dubbed audio build failed: {build_result.stderr[-1500:]}")
 
-        # --- Remux into the final output MP4 ---
+        # --- Remux into the job dir final MP4, then sync to user output ---
+        # The canonical final video lives in the job dir so regeneration can
+        # rebuild it safely. We copy to the user's requested output path after.
         remux_cmd = [
             sys.executable, REMUX_SCRIPT.as_posix(),
             "--input-video", input_video.as_posix(),
             "--dubbed-audio", dubbed_audio.as_posix(),
-            "--output-video", output_video.as_posix(),
+            "--output-video", final_video_job.as_posix(),
         ]
         remux_result = run_subprocess(remux_cmd, ROOT, "remux")
-        if remux_result.returncode != 0 or not output_video.is_file():
+        if remux_result.returncode != 0 or not final_video_job.is_file():
             raise RuntimeError(f"remux failed: {remux_result.stderr[-1500:]}")
 
+        # Sync to the user's requested output path
+        output_video.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(final_video_job, output_video)
         final_duration = ffprobe_duration(output_video)
 
         # --- Write review_segments.json + remux_command.json ---
-        # These artifacts make regenerate_segment.py --remux work on this job.
+        # remux_command points to the job dir final video so regeneration
+        # rebuilds that, then syncs to the user output path via report.json.
         queue_file = latest_queue(started)
         srt_file = latest_srt(started)
         _write_review_file(
             review_path, queue_file, stable_manifest, srt_file, job_dir, generated_audio
         )
         _write_remux_command(
-            remux_path, input_video, dubbed_audio, output_video, stable_manifest
+            remux_path, input_video, dubbed_audio, final_video_job, stable_manifest
         )
 
         report["status"] = "pass"
         report["final_duration_seconds"] = final_duration
         report["review_segments"] = review_path.as_posix()
         report["remux_command"] = remux_path.as_posix()
+        report["final_video_job"] = final_video_job.as_posix()
+        report["output_video"] = output_video.as_posix()
         write_json(report_path, report)
         print()
         print("run_personal_dub: PASS")
         print(f"Final dubbed video: {output_video}")
+        print(f"Job video: {final_video_job}")
         print(f"Duration: {final_duration:.3f}s")
         print(f"Segments: {report['segments_ok']} ok / {report['segments_total']} total")
         print(f"Report: {report_path}")

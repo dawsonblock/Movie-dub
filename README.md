@@ -133,9 +133,14 @@ python scripts/regenerate_segment.py \
   --remux
 ```
 
-`--remux` rebuilds `dubbed_audio.wav` from the updated manifest and remuxes
-`final_dubbed.mp4`, so the change is reflected in the final video. This
-works for both smoke jobs and personal dub jobs.
+`--remux` rebuilds `dubbed_audio.wav` from the updated manifest, remuxes
+`final_dubbed.mp4` in the job directory, and syncs the result to your
+configured output path. This works for both smoke jobs and personal dub jobs.
+
+**Warning:** Regeneration updates the job output video and overwrites the
+configured output MP4 path. Keep the job directory if you want future
+segment repair. The canonical final video lives at
+`<job_dir>/final_dubbed.mp4` — the user output path is a synced copy.
 
 ## Troubleshooting
 

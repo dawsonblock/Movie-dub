@@ -122,9 +122,17 @@ def write_review_file(
         manifest_preview = json.loads(manifest_file.read_text(encoding="utf-8"))
         queue = []
         for index, result in enumerate(manifest_preview.get("results", [])):
-            text = srt_items[index]["text"] if index < len(srt_items) else ""
-            start = srt_items[index]["start"] if index < len(srt_items) else 0.0
-            end = srt_items[index]["end"] if index < len(srt_items) else result.get("target_duration", 0.0)
+            # Prefer SRT text, then fall back to the manifest's own text field
+            # so review entries are never empty when the manifest has usable text.
+            srt_text = srt_items[index]["text"] if index < len(srt_items) else ""
+            text = (
+                srt_text
+                or result.get("text")
+                or result.get("target_text")
+                or ""
+            )
+            start = srt_items[index]["start"] if index < len(srt_items) else result.get("start", 0.0)
+            end = srt_items[index]["end"] if index < len(srt_items) else result.get("end", result.get("target_duration", 0.0))
             queue.append(
                 {
                     "id": result.get("id", index + 1),

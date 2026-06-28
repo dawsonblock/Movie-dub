@@ -25,6 +25,10 @@ The checkpoint directory must contain at least:
 ## Smoke checks
 
 ```bash
+./scripts/setup_ffmpeg_mac.sh
+./scripts/setup_openvoice_mac.sh
+python3 scripts/doctor.py
+python3 scripts/smoke_openvoice_bridge.py
 python3 -m py_compile bridge/openvoice_segment_tts.py pyvideotrans-main/videotrans/tts/_openvoice.py
 cd pyvideotrans-main
 .venv/bin/python -m pytest tests/test_openvoice_bridge.py -q

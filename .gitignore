@@ -19,6 +19,9 @@
 /pyvideotrans-main/models/
 /pyvideotrans-main/tmp/
 /pyvideotrans-main/output/
+/pyvideotrans-main/ffmpeg/ffmpeg
+/pyvideotrans-main/ffmpeg/ffprobe
+/pyvideotrans-main/ffmpeg/*.zip
 /OpenVoice-main/checkpoints/
 /OpenVoice-main/checkpoints_v2/
 /OpenVoice-main/processed/

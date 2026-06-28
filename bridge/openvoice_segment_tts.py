@@ -96,6 +96,19 @@ def resolve_reference(item: dict[str, Any], default_reference: str | None) -> st
     return ref_path.as_posix()
 
 
+def resolve_device(device: str):
+    import torch
+
+    requested = (device or "auto").strip().lower()
+    if requested != "auto":
+        return device, torch
+    if torch.cuda.is_available():
+        return "cuda:0", torch
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return "mps", torch
+    return "cpu", torch
+
+
 def load_openvoice(checkpoint_dir: str, device: str):
     import torch
     from openvoice.api import ToneColorConverter
@@ -107,6 +120,31 @@ def load_openvoice(checkpoint_dir: str, device: str):
     converter.watermark_model = None
     converter.load_ckpt(checkpoint_path.as_posix())
     return converter, torch
+
+
+def load_runtime(args: argparse.Namespace, device: str, language: str, base_speaker: str | None):
+    from melo.api import TTS
+
+    converter, torch_mod = load_openvoice(args.checkpoint_dir, device)
+    model = TTS(language=language, device=device)
+    speaker_ids = model.hps.data.spk2id
+    if not speaker_ids:
+        raise RuntimeError(f"No MeloTTS speakers available for language {language}")
+    if not base_speaker:
+        base_speaker = next(iter(speaker_ids.keys()))
+    if base_speaker not in speaker_ids:
+        raise ValueError(
+            f"Base speaker '{base_speaker}' is not available for {language}. "
+            f"Available: {', '.join(speaker_ids.keys())}"
+        )
+
+    speaker_id = speaker_ids[base_speaker]
+    speaker_key = base_speaker.lower().replace("_", "-")
+    source_se_path = Path(args.checkpoint_dir).expanduser() / "base_speakers" / "ses" / f"{speaker_key}.pth"
+    if not source_se_path.is_file():
+        raise FileNotFoundError(f"OpenVoice source speaker embedding not found: {source_se_path}")
+    source_se = torch_mod.load(source_se_path.as_posix(), map_location=device)
+    return converter, torch_mod, model, speaker_id, source_se, base_speaker
 
 
 def validate_checkpoint_dir(checkpoint_dir: str) -> Path:
@@ -136,32 +174,21 @@ def synthesize_segments(args: argparse.Namespace) -> int:
     speed = float(args.speed)
     validate_checkpoint_dir(args.checkpoint_dir)
 
-    import torch
-    from melo.api import TTS
-
-    device = args.device
-    if device == "auto":
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
-
-    converter, torch_mod = load_openvoice(args.checkpoint_dir, device)
-    model = TTS(language=language, device=device)
-    speaker_ids = model.hps.data.spk2id
-    if not speaker_ids:
-        raise RuntimeError(f"No MeloTTS speakers available for language {language}")
-    if not base_speaker:
-        base_speaker = next(iter(speaker_ids.keys()))
-    if base_speaker not in speaker_ids:
-        raise ValueError(
-            f"Base speaker '{base_speaker}' is not available for {language}. "
-            f"Available: {', '.join(speaker_ids.keys())}"
+    device, _ = resolve_device(args.device)
+    fallback_reason = ""
+    try:
+        converter, torch_mod, model, speaker_id, source_se, base_speaker = load_runtime(
+            args, device, language, base_speaker
         )
-
-    speaker_id = speaker_ids[base_speaker]
-    speaker_key = base_speaker.lower().replace("_", "-")
-    source_se_path = Path(args.checkpoint_dir).expanduser() / "base_speakers" / "ses" / f"{speaker_key}.pth"
-    if not source_se_path.is_file():
-        raise FileNotFoundError(f"OpenVoice source speaker embedding not found: {source_se_path}")
-    source_se = torch_mod.load(source_se_path.as_posix(), map_location=device)
+    except Exception as exc:
+        if device != "mps":
+            raise
+        fallback_reason = f"MPS runtime setup failed, retried on CPU: {exc}"
+        write_log(args.logs_file, fallback_reason, "error")
+        device = "cpu"
+        converter, torch_mod, model, speaker_id, source_se, base_speaker = load_runtime(
+            args, device, language, base_speaker
+        )
 
     work_dir = Path(args.work_dir).expanduser().resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -205,13 +232,34 @@ def synthesize_segments(args: argparse.Namespace) -> int:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = work_dir / f"openvoice-src-{index:06d}.wav"
             model.tts_to_file(text, speaker_id, tmp_path.as_posix(), speed=speed)
-            converter.convert(
-                audio_src_path=tmp_path.as_posix(),
-                src_se=source_se,
-                tgt_se=target_se,
-                output_path=output_path.as_posix(),
-                message=args.watermark,
-            )
+            try:
+                converter.convert(
+                    audio_src_path=tmp_path.as_posix(),
+                    src_se=source_se,
+                    tgt_se=target_se,
+                    output_path=output_path.as_posix(),
+                    message=args.watermark,
+                )
+            except Exception as exc:
+                if device != "mps":
+                    raise
+                fallback_reason = f"MPS segment generation failed, retried on CPU: {exc}"
+                write_log(args.logs_file, fallback_reason, "error")
+                device = "cpu"
+                converter, torch_mod, model, speaker_id, source_se, base_speaker = load_runtime(
+                    args, device, language, base_speaker
+                )
+                target_se_cache.clear()
+                target_se = converter.extract_se(ref)
+                target_se_cache[ref] = target_se
+                model.tts_to_file(text, speaker_id, tmp_path.as_posix(), speed=speed)
+                converter.convert(
+                    audio_src_path=tmp_path.as_posix(),
+                    src_se=source_se,
+                    tgt_se=target_se,
+                    output_path=output_path.as_posix(),
+                    message=args.watermark,
+                )
 
             generated = wav_duration(output_path.as_posix())
             start = item.get("start_time", item.get("start"))
@@ -225,6 +273,7 @@ def synthesize_segments(args: argparse.Namespace) -> int:
                 {
                     "status": "ok",
                     "reference_audio": ref,
+                    "device": device,
                     "generated_duration": generated,
                     "target_duration": target_duration,
                     "duration_ratio": None if ratio is None or math.isnan(ratio) else ratio,
@@ -245,6 +294,8 @@ def synthesize_segments(args: argparse.Namespace) -> int:
         "error": err,
         "language": language,
         "base_speaker": base_speaker,
+        "device": device,
+        "fallback_reason": fallback_reason,
         "results": results,
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")

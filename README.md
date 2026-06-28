@@ -53,6 +53,7 @@ make setup-ffmpeg
 make setup-pyvt
 make setup-openvoice
 make download-openvoice
+make doctor
 ```
 
 Checkpoints are not committed to git and are only downloaded when you explicitly run `make download-openvoice`.
@@ -62,34 +63,71 @@ The default checkpoint repo is `rsxdalv/OpenVoiceV2`. To use a personal mirror o
 OPENVOICE_HF_REPO=DmanBlock/OpenVoiceV2-bucket make download-openvoice
 ```
 
-Then run:
+You can pin a known-good checkpoint revision:
 
 ```bash
-make doctor
+OPENVOICE_HF_REVISION=<commit> make download-openvoice
 ```
 
 ## Smoke Tests
 
+Run these after install to confirm the runtime is ready:
+
 ```bash
 make smoke-openvoice
 make smoke-e2e
-make test-openvoice
+make test-pyvt
 ```
 
 The OpenVoice provider is registered in pyVideoTrans as provider `34`, displayed as `OpenVoice V2(Local)`.
 
-## Run Your Own Short Clip
+## Dub Your Own Video
 
-Use pyVideoTrans CLI with TTS provider `34` after `make doctor` passes. Start with a 1-2 minute clip before trying long videos.
+After `make doctor` passes and the smoke tests are green, dub a personal clip.
+Start with a 1-2 minute clip (clear speech, one or two speakers, little music)
+before trying long videos.
 
 ```bash
-cd pyvideotrans-main
-.venv/bin/python cli.py --task vtv --name /absolute/path/input.mp4 \
-  --recogn_type 0 --model_name tiny \
-  --source_language_code en --target_language_code en \
-  --tts_type 34 --voice_role default \
-  --subtitle_type 1 --no-clear-cache --verbose
+make dub INPUT=~/Movies/test.mp4 OUTPUT=~/Movies/dubbed-test.mp4
 ```
+
+Optional flags:
+
+```bash
+make dub INPUT=~/Movies/test.mp4 OUTPUT=~/Movies/dubbed-test.mp4 \
+     SOURCE=en TARGET=en REFERENCE=voices/openvoice_default_reference.wav
+```
+
+Or call the script directly:
+
+```bash
+python scripts/run_personal_dub.py \
+  --input ~/Movies/test.mp4 \
+  --source-language en \
+  --target-language en \
+  --reference voices/openvoice_default_reference.wav \
+  --output ~/Movies/dubbed-test.mp4
+```
+
+The wrapper runs the full pyVideoTrans VTV pipeline with OpenVoice, then
+rebuilds the dubbed audio track from the manifest and remuxes it into the
+final MP4. Job artifacts (manifest, segment WAVs, dubbed audio, report)
+are kept under `pyvideotrans-main/tmp/personal_dub/<timestamp>/`.
+
+## Regenerate a Segment
+
+If a segment sounds wrong, regenerate it and rebuild the final video:
+
+```bash
+python scripts/regenerate_segment.py \
+  --job-dir pyvideotrans-main/tmp/personal_dub/<timestamp> \
+  --segment-id 3 \
+  --text "Corrected shorter line." \
+  --remux
+```
+
+`--remux` rebuilds `dubbed_audio.wav` from the updated manifest and remuxes
+`final_dubbed.mp4`, so the change is reflected in the final video.
 
 ## Troubleshooting
 

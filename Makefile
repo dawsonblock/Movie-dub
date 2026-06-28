@@ -1,4 +1,4 @@
-.PHONY: doctor setup-ffmpeg setup-pyvt setup-openvoice setup-checkpoints download-openvoice smoke-openvoice smoke-e2e test-openvoice test-pyvt
+.PHONY: doctor setup-ffmpeg setup-pyvt setup-openvoice setup-checkpoints download-openvoice smoke-openvoice smoke-e2e test-openvoice test-pyvt dub
 
 doctor:
 	python3 scripts/doctor.py
@@ -29,3 +29,18 @@ test-openvoice:
 
 test-pyvt:
 	cd pyvideotrans-main && .venv/bin/python -m pytest
+
+# Personal dubbing wrapper. Usage:
+#   make dub INPUT=~/Movies/test.mp4 OUTPUT=~/Movies/dubbed-test.mp4
+# Optional: SOURCE=en TARGET=en REFERENCE=voices/openvoice_default_reference.wav
+dub:
+	@if [ -z "$(INPUT)" ] || [ -z "$(OUTPUT)" ]; then \
+		echo "Usage: make dub INPUT=<input.mp4> OUTPUT=<output.mp4>"; \
+		exit 1; \
+	fi
+	python3 scripts/run_personal_dub.py \
+		--input "$(INPUT)" \
+		--source-language $(or $(SOURCE),en) \
+		--target-language $(or $(TARGET),en) \
+		--reference $(or $(REFERENCE),voices/openvoice_default_reference.wav) \
+		--output "$(OUTPUT)"

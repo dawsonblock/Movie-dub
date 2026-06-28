@@ -120,10 +120,19 @@ Audio quality flags:
 | `--voice-volume` | `1.0` | Gain on dubbed speech (1.5 = louder, 0.5 = quieter) |
 | `--final-gain` | `1.0` | Gain applied after normalization (1.0 = no change) |
 | `--no-normalize` | off | Skip peak normalization — use with `--final-gain` for manual level control |
+| `--vocal-separation` | off | Remove center-channel vocals from background audio (karaoke-style) |
+| `--ducking` | off | Lower background volume where dubbed speech is present |
+| `--target-lufs` | off | EBU R128 LUFS normalization (-16 = web/streaming, -23 = broadcast) |
 
-For normal use, `--background-volume 0.15` is enough. Use `--voice-volume`
-if the dubbed speech is too quiet or too loud relative to the background.
-Use `--no-normalize` + `--final-gain` only if you need manual level control.
+For normal use, `--background-volume 0.15` is enough. For movies with music:
+
+```bash
+make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 \
+     BACKGROUND_VOLUME=0.2 VOCAL_SEPARATION=1 DUCKING=1 TARGET_LUFS=-16
+```
+
+This removes the original vocals from the background, ducks the music when
+speech is playing, and normalizes the final mix to streaming loudness.
 
 The wrapper runs the full pyVideoTrans VTV pipeline with OpenVoice, then
 rebuilds the dubbed audio track from the manifest and remuxes it into the

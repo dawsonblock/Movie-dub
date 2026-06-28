@@ -134,6 +134,12 @@ def main() -> int:
                         help="gain applied after normalization (1.0=no change)")
     parser.add_argument("--no-normalize", action="store_true",
                         help="skip peak normalization (use with --final-gain for manual control)")
+    parser.add_argument("--vocal-separation", action="store_true",
+                        help="remove center-channel vocals from background audio")
+    parser.add_argument("--ducking", action="store_true",
+                        help="lower background volume where dubbed speech is present")
+    parser.add_argument("--target-lufs", type=float, default=None,
+                        help="apply EBU R128 LUFS normalization (-16=web, -23=broadcast)")
     args = parser.parse_args()
 
     input_video = Path(args.input).expanduser().resolve()
@@ -290,6 +296,12 @@ def main() -> int:
             build_cmd.extend(["--final-gain", str(args.final_gain)])
         if args.no_normalize:
             build_cmd.append("--no-normalize")
+        if args.vocal_separation:
+            build_cmd.append("--vocal-separation")
+        if args.ducking:
+            build_cmd.append("--ducking")
+        if args.target_lufs is not None:
+            build_cmd.extend(["--target-lufs", str(args.target_lufs)])
         build_result = run_subprocess(build_cmd, ROOT, "build-dubbed-audio")
         if build_result.returncode != 0 or not dubbed_audio.is_file():
             raise RuntimeError(f"dubbed audio build failed: {build_result.stderr[-1500:]}")

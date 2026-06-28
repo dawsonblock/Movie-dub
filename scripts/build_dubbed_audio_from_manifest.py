@@ -247,12 +247,18 @@ def normalize(samples, target_peak: float = 0.97):
 
 
 def _mix_background_audio(
-    canvas, input_video: Path, sample_rate: int, total_samples: int, volume: float
+    canvas, input_video: Path, sample_rate: int, total_samples: int, volume: float,
+    vocal_separation: bool = False,
+    ducking: bool = False,
+    speech_regions: list[tuple[int, int]] | None = None,
 ) -> bool:
     """Extract original audio from the input video and mix it under the speech canvas.
 
-    Uses ffmpeg to extract a mono WAV at the target sample rate, then adds it
-    to the canvas at the specified volume. Returns True if mixing succeeded.
+    If vocal_separation is True, removes center-channel vocals from the
+    background before mixing (karaoke-style center removal via FFmpeg).
+    If ducking is True, lowers the background volume where speech is present
+    using a smooth envelope derived from speech_regions.
+    Returns True if mixing succeeded.
     """
     import subprocess
     import tempfile
@@ -261,15 +267,31 @@ def _mix_background_audio(
     try:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             bg_path = Path(tmp.name)
-        cmd = [
-            local_ffmpeg(), "-hide_banner", "-nostdin", "-y",
-            "-i", input_video.as_posix(),
-            "-vn",  # no video
-            "-ac", "1",  # mono
-            "-ar", str(sample_rate),
-            "-f", "wav",
-            bg_path.as_posix(),
-        ]
+
+        if vocal_separation:
+            # Extract stereo audio, then remove center channel (vocals)
+            # using FFmpeg's pan filter: L-R, R-L cancels centered vocals
+            cmd = [
+                local_ffmpeg(), "-hide_banner", "-nostdin", "-y",
+                "-i", input_video.as_posix(),
+                "-vn",
+                "-af", "pan=stereo|c0=c0-c1|c1=c1-c0,"
+                       "aformat=channel_layouts=mono",
+                "-ac", "1",
+                "-ar", str(sample_rate),
+                "-f", "wav",
+                bg_path.as_posix(),
+            ]
+        else:
+            cmd = [
+                local_ffmpeg(), "-hide_banner", "-nostdin", "-y",
+                "-i", input_video.as_posix(),
+                "-vn",
+                "-ac", "1",
+                "-ar", str(sample_rate),
+                "-f", "wav",
+                bg_path.as_posix(),
+            ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         if result.returncode != 0 or not bg_path.is_file():
             return False
@@ -279,6 +301,35 @@ def _mix_background_audio(
         if _have_soundfile():
             import numpy as np
             bg_arr = np.asarray(bg_samples, dtype="float32") * volume
+
+            if ducking and speech_regions:
+                # Create a ducking envelope: 1.0 where no speech,
+                # duck_level (0.3) where speech is present, with smooth
+                # transitions to avoid clicks.
+                duck_level = 0.3
+                fade_samples = int(0.05 * sample_rate)  # 50ms fade
+                envelope = np.ones(total_samples, dtype="float32")
+                for start_idx, end_idx in speech_regions:
+                    s = max(0, start_idx - fade_samples)
+                    e = min(total_samples, end_idx + fade_samples)
+                    envelope[start_idx:end_idx] = duck_level
+                    # Smooth fade in
+                    if start_idx > 0:
+                        fade_len = min(fade_samples, start_idx - s)
+                        if fade_len > 0:
+                            envelope[s:start_idx] = np.linspace(
+                                1.0, duck_level, fade_len
+                            )
+                    # Smooth fade out
+                    if end_idx < total_samples:
+                        fade_len = min(fade_samples, e - end_idx)
+                        if fade_len > 0:
+                            envelope[end_idx:e] = np.linspace(
+                                duck_level, 1.0, fade_len
+                            )
+                n = min(len(bg_arr), total_samples)
+                bg_arr[:n] *= envelope[:n]
+
             n = min(len(bg_arr), total_samples)
             canvas[:n] += bg_arr[:n]
         else:
@@ -293,6 +344,36 @@ def _mix_background_audio(
             bg_path.unlink(missing_ok=True)
 
 
+def _apply_lufs_normalization(
+    input_wav: Path, output_wav: Path, target_lufs: float = -16.0
+) -> bool:
+    """Apply EBU R128 LUFS normalization via FFmpeg loudnorm filter.
+
+    target_lufs: -16.0 is typical for web/streaming, -23.0 for EBU broadcast.
+    Returns True if normalization succeeded.
+    """
+    import subprocess
+
+    try:
+        cmd = [
+            local_ffmpeg(), "-hide_banner", "-nostdin", "-y",
+            "-i", input_wav.as_posix(),
+            "-af", f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11",
+            "-ar", str(DEFAULT_SAMPLE_RATE),
+            "-f", "wav",
+            output_wav.as_posix(),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            return False
+        # Replace the original with the normalized version
+        if output_wav.is_file() and input_wav.is_file():
+            shutil.move(output_wav.as_posix(), input_wav.as_posix())
+        return True
+    except Exception:
+        return False
+
+
 def build_dubbed_audio(
     manifest_path: Path,
     input_video: Path,
@@ -303,6 +384,9 @@ def build_dubbed_audio(
     voice_volume: float = 1.0,
     final_gain: float = 1.0,
     no_normalize: bool = False,
+    vocal_separation: bool = False,
+    ducking: bool = False,
+    target_lufs: float | None = None,
 ) -> dict:
     manifest = read_json(manifest_path)
     segments = manifest_segments(manifest)
@@ -322,6 +406,7 @@ def build_dubbed_audio(
     skipped = 0
     failed = 0
     errors: list[str] = []
+    speech_regions: list[tuple[int, int]] = []  # (start_idx, end_idx) for ducking
 
     for seg in segments:
         status = seg.get("status", "ok")
@@ -371,6 +456,7 @@ def build_dubbed_audio(
                 if idx >= total_samples:
                     break
                 canvas[idx] += float(v) * voice_volume
+        speech_regions.append((start_index, end_index))
         placed += 1
 
     if placed == 0:
@@ -380,7 +466,10 @@ def build_dubbed_audio(
     background_mix = False
     if background_volume > 0:
         background_mix = _mix_background_audio(
-            canvas, input_video, sample_rate, total_samples, background_volume
+            canvas, input_video, sample_rate, total_samples, background_volume,
+            vocal_separation=vocal_separation,
+            ducking=ducking,
+            speech_regions=speech_regions if ducking else None,
         )
 
     if no_normalize:
@@ -399,6 +488,15 @@ def build_dubbed_audio(
             final = [float(v) * final_gain for v in normalized]
     write_audio_samples(output_audio, final, sample_rate)
 
+    # Optionally apply EBU R128 LUFS normalization as a post-processing step
+    lufs_applied = False
+    if target_lufs is not None:
+        import tempfile
+        tmp_normalized = Path(tempfile.mktemp(suffix=".wav"))
+        lufs_applied = _apply_lufs_normalization(
+            output_audio, tmp_normalized, target_lufs
+        )
+
     return {
         "status": "ok",
         "input_video": input_video.as_posix(),
@@ -416,6 +514,10 @@ def build_dubbed_audio(
         "voice_volume": voice_volume,
         "final_gain": final_gain,
         "no_normalize": no_normalize,
+        "vocal_separation": vocal_separation,
+        "ducking": ducking,
+        "target_lufs": target_lufs,
+        "lufs_applied": lufs_applied,
     }
 
 
@@ -435,6 +537,12 @@ def main() -> int:
                         help="gain applied to the final mix after normalization (1.0=no change)")
     parser.add_argument("--no-normalize", action="store_true",
                         help="skip peak normalization (use with --final-gain for manual level control)")
+    parser.add_argument("--vocal-separation", action="store_true",
+                        help="remove center-channel vocals from background audio (karaoke-style)")
+    parser.add_argument("--ducking", action="store_true",
+                        help="lower background volume where dubbed speech is present")
+    parser.add_argument("--target-lufs", type=float, default=None,
+                        help="apply EBU R128 LUFS normalization (-16=web, -23=broadcast)")
     args = parser.parse_args()
 
     manifest_path = Path(args.manifest).expanduser().resolve()
@@ -450,6 +558,9 @@ def main() -> int:
             voice_volume=args.voice_volume,
             final_gain=args.final_gain,
             no_normalize=args.no_normalize,
+            vocal_separation=args.vocal_separation,
+            ducking=args.ducking,
+            target_lufs=args.target_lufs,
         )
         print("Build dubbed audio: PASS")
         print(f"Output: {output_audio}")
@@ -463,6 +574,13 @@ def main() -> int:
             print(f"Final gain: {args.final_gain}")
         if args.no_normalize:
             print("Normalize: off")
+        if args.vocal_separation:
+            print("Vocal separation: on (center removal)")
+        if args.ducking:
+            print("Ducking: on")
+        if args.target_lufs is not None:
+            status = "applied" if report.get("lufs_applied") else "failed"
+            print(f"LUFS: {args.target_lufs} ({status})")
         return 0
     except Exception as exc:
         print("Build dubbed audio: FAIL", file=sys.stderr)

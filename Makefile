@@ -42,7 +42,8 @@ test-pyvt:
 # Personal dubbing wrapper. Usage:
 #   make dub INPUT=~/Movies/test.mp4 OUTPUT=~/Movies/dubbed-test.mp4
 # Optional: SOURCE=en TARGET=en REFERENCE=voices/openvoice_default_reference.wav
-#           BACKGROUND_VOLUME=0.15 VOICE_VOLUME=1.0 FINAL_GAIN=1.0 NO_NORMALIZE=1
+#           BACKGROUND_VOLUME=0.15 VOICE_VOLUME=1.2 VOCAL_SEPARATION=1
+#           DUCKING=1 TARGET_LUFS=-16 NO_NORMALIZE=1 FINAL_GAIN=1.0
 dub:
 	@if [ -z "$(INPUT)" ] || [ -z "$(OUTPUT)" ]; then \
 		echo "Usage: make dub INPUT=<input.mp4> OUTPUT=<output.mp4>"; \
@@ -57,4 +58,7 @@ dub:
 		$(if $(BACKGROUND_VOLUME),--background-volume $(BACKGROUND_VOLUME)) \
 		$(if $(VOICE_VOLUME),--voice-volume $(VOICE_VOLUME)) \
 		$(if $(FINAL_GAIN),--final-gain $(FINAL_GAIN)) \
-		$(if $(NO_NORMALIZE),--no-normalize)
+		$(if $(NO_NORMALIZE),--no-normalize) \
+		$(if $(VOCAL_SEPARATION),--vocal-separation) \
+		$(if $(DUCKING),--ducking) \
+		$(if $(TARGET_LUFS),--target-lufs $(TARGET_LUFS))

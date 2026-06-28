@@ -342,3 +342,148 @@ def test_report_includes_audio_quality_fields(tmp_path):
     assert report["voice_volume"] == 1.5
     assert report["final_gain"] == 0.8
     assert report["no_normalize"] is True
+
+
+def test_report_includes_advanced_audio_fields(tmp_path):
+    """The build report should include vocal_separation, ducking, lufs fields."""
+    gen = tmp_path / "generated_audio"
+    _write_tone_wav(gen / "000001.wav", 1.0)
+    manifest = {
+        "ok": 1, "error": 0, "skipped": 0,
+        "segments": [
+            {"id": 1, "status": "ok", "start": 0.0, "end": 1.0,
+             "output_audio": (gen / "000001.wav").as_posix()},
+        ],
+    }
+    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    output_audio = tmp_path / "dubbed_audio.wav"
+
+    report = build_dubbed_audio_from_manifest.build_dubbed_audio(
+        manifest_path, TEST_VIDEO, output_audio,
+        vocal_separation=True, ducking=True, target_lufs=-16.0,
+        background_volume=0.15,
+    )
+
+    assert report["vocal_separation"] is True
+    assert report["ducking"] is True
+    assert report["target_lufs"] == -16.0
+    # lufs_applied may be True or False depending on ffmpeg, but key must exist
+    assert "lufs_applied" in report
+
+
+def test_vocal_separation_with_background(tmp_path):
+    """Vocal separation + background volume should produce a valid WAV."""
+    gen = tmp_path / "generated_audio"
+    _write_tone_wav(gen / "000001.wav", 1.0)
+    manifest = {
+        "ok": 1, "error": 0, "skipped": 0,
+        "segments": [
+            {"id": 1, "status": "ok", "start": 0.0, "end": 1.0,
+             "output_audio": (gen / "000001.wav").as_posix()},
+        ],
+    }
+    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    output_audio = tmp_path / "dubbed_audio.wav"
+
+    report = build_dubbed_audio_from_manifest.build_dubbed_audio(
+        manifest_path, TEST_VIDEO, output_audio,
+        background_volume=0.2, vocal_separation=True,
+    )
+
+    assert report["status"] == "ok"
+    assert report["background_mix"] is True
+    assert output_audio.is_file()
+    # Duration should still match the video
+    with wave.open(output_audio.as_posix(), "rb") as wav:
+        duration = wav.getnframes() / wav.getframerate()
+    assert 7.0 < duration < 10.0
+
+
+def test_ducking_with_background(tmp_path):
+    """Ducking + background volume should produce a valid WAV."""
+    gen = tmp_path / "generated_audio"
+    _write_tone_wav(gen / "000001.wav", 1.0)
+    manifest = {
+        "ok": 1, "error": 0, "skipped": 0,
+        "segments": [
+            {"id": 1, "status": "ok", "start": 0.0, "end": 1.0,
+             "output_audio": (gen / "000001.wav").as_posix()},
+            {"id": 2, "status": "ok", "start": 2.0, "end": 3.0,
+             "output_audio": (gen / "000002.wav").as_posix()},
+        ],
+    }
+    # Write second segment WAV
+    _write_tone_wav(gen / "000002.wav", 1.0)
+    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    output_audio = tmp_path / "dubbed_audio.wav"
+
+    report = build_dubbed_audio_from_manifest.build_dubbed_audio(
+        manifest_path, TEST_VIDEO, output_audio,
+        background_volume=0.2, ducking=True,
+    )
+
+    assert report["status"] == "ok"
+    assert report["background_mix"] is True
+    assert report["ducking"] is True
+    assert output_audio.is_file()
+
+
+def test_lufs_normalization(tmp_path):
+    """LUFS normalization should produce a valid WAV."""
+    gen = tmp_path / "generated_audio"
+    _write_tone_wav(gen / "000001.wav", 1.0)
+    manifest = {
+        "ok": 1, "error": 0, "skipped": 0,
+        "segments": [
+            {"id": 1, "status": "ok", "start": 0.0, "end": 1.0,
+             "output_audio": (gen / "000001.wav").as_posix()},
+        ],
+    }
+    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    output_audio = tmp_path / "dubbed_audio.wav"
+
+    report = build_dubbed_audio_from_manifest.build_dubbed_audio(
+        manifest_path, TEST_VIDEO, output_audio,
+        target_lufs=-16.0,
+    )
+
+    assert report["status"] == "ok"
+    assert report["target_lufs"] == -16.0
+    # LUFS may or may not succeed depending on ffmpeg version, but output must exist
+    assert output_audio.is_file()
+
+
+def test_vocal_separation_ducking_lufs_combined(tmp_path):
+    """All advanced features together should produce a valid WAV."""
+    gen = tmp_path / "generated_audio"
+    _write_tone_wav(gen / "000001.wav", 1.0)
+    _write_tone_wav(gen / "000002.wav", 0.8)
+    manifest = {
+        "ok": 2, "error": 0, "skipped": 0,
+        "segments": [
+            {"id": 1, "status": "ok", "start": 0.5, "end": 1.5,
+             "output_audio": (gen / "000001.wav").as_posix()},
+            {"id": 2, "status": "ok", "start": 2.0, "end": 2.8,
+             "output_audio": (gen / "000002.wav").as_posix()},
+        ],
+    }
+    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    output_audio = tmp_path / "dubbed_audio.wav"
+
+    report = build_dubbed_audio_from_manifest.build_dubbed_audio(
+        manifest_path, TEST_VIDEO, output_audio,
+        background_volume=0.15, vocal_separation=True,
+        ducking=True, target_lufs=-16.0,
+    )
+
+    assert report["status"] == "ok"
+    assert report["segments_placed"] == 2
+    assert report["background_mix"] is True
+    assert report["vocal_separation"] is True
+    assert report["ducking"] is True
+    assert output_audio.is_file()

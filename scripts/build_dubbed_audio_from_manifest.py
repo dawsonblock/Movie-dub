@@ -35,6 +35,20 @@ def local_ffmpeg() -> str:
     raise RuntimeError("ffmpeg not found")
 
 
+def local_ffprobe() -> str:
+    """Find ffprobe: prefer bundled, then PATH, then common Homebrew locations."""
+    candidates = [
+        Path(__file__).resolve().parents[1] / "pyvideotrans-main" / "ffmpeg" / "ffprobe",
+        Path(shutil.which("ffprobe") or ""),
+        Path("/opt/homebrew/bin/ffprobe"),
+        Path("/usr/local/bin/ffprobe"),
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.as_posix()
+    raise RuntimeError("ffprobe not found")
+
+
 SUPPORTED_SAMPLE_RATES = (44100, 48000, 24000, 22050, 16000)
 DEFAULT_SAMPLE_RATE = 44100
 
@@ -46,11 +60,6 @@ def read_json(path: Path) -> dict | list:
 def write_json(path: Path, data: dict | list) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def local_ffprobe() -> str:
-    bundled = Path(__file__).resolve().parents[1] / "pyvideotrans-main" / "ffmpeg" / "ffprobe"
-    return bundled.as_posix() if bundled.is_file() else "ffprobe"
 
 
 def ffprobe_duration(path: Path) -> float:
@@ -251,6 +260,7 @@ def _mix_background_audio(
     vocal_separation: bool = False,
     ducking: bool = False,
     speech_regions: list[tuple[int, int]] | None = None,
+    timeout: int = 300,
 ) -> bool:
     """Extract original audio from the input video and mix it under the speech canvas.
 
@@ -292,7 +302,7 @@ def _mix_background_audio(
                 "-f", "wav",
                 bg_path.as_posix(),
             ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if result.returncode != 0 or not bg_path.is_file():
             return False
 
@@ -345,7 +355,7 @@ def _mix_background_audio(
 
 
 def _apply_lufs_normalization(
-    input_wav: Path, target_lufs: float = -16.0
+    input_wav: Path, target_lufs: float = -16.0, timeout: int = 600
 ) -> bool:
     """Apply EBU R128 LUFS normalization via FFmpeg loudnorm filter.
 
@@ -369,7 +379,7 @@ def _apply_lufs_normalization(
             "-f", "wav",
             tmp_path.as_posix(),
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if result.returncode != 0 or not tmp_path.is_file():
             return False
         # Replace the original with the normalized version
@@ -396,6 +406,9 @@ def build_dubbed_audio(
     vocal_separation: bool = False,
     ducking: bool = False,
     target_lufs: float | None = None,
+    background_timeout: int = 300,
+    lufs_timeout: int = 600,
+    fail_if_background_mix_fails: bool = False,
 ) -> dict:
     manifest = read_json(manifest_path)
     segments = manifest_segments(manifest)
@@ -471,15 +484,27 @@ def build_dubbed_audio(
     if placed == 0:
         raise RuntimeError("no segments were placed on the audio canvas")
 
-    # Optionally mix original audio (background music, ambience) under the speech.
+    # Optionally mix original audio (background music, ambience) under
+    # the speech.
     background_mix = False
+    background_warning = ""
     if background_volume > 0:
         background_mix = _mix_background_audio(
-            canvas, input_video, sample_rate, total_samples, background_volume,
+            canvas, input_video, sample_rate, total_samples,
+            background_volume,
             vocal_separation=vocal_separation,
             ducking=ducking,
             speech_regions=speech_regions if ducking else None,
+            timeout=background_timeout,
         )
+        if not background_mix:
+            background_warning = (
+                "background audio mix failed (ffmpeg timeout or error); "
+                "output will have no background audio"
+            )
+            if fail_if_background_mix_fails:
+                raise RuntimeError(background_warning)
+            print(f"WARNING: {background_warning}", file=sys.stderr)
 
     if no_normalize:
         # Skip peak normalization — apply final_gain directly
@@ -499,8 +524,17 @@ def build_dubbed_audio(
 
     # Optionally apply EBU R128 LUFS normalization as a post-processing step
     lufs_applied = False
+    lufs_warning = ""
     if target_lufs is not None:
-        lufs_applied = _apply_lufs_normalization(output_audio, target_lufs)
+        lufs_applied = _apply_lufs_normalization(
+            output_audio, target_lufs, timeout=lufs_timeout
+        )
+        if not lufs_applied:
+            lufs_warning = (
+                "LUFS normalization failed (ffmpeg timeout or error); "
+                "output keeps pre-LUFS levels"
+            )
+            print(f"WARNING: {lufs_warning}", file=sys.stderr)
 
     return {
         "status": "ok",
@@ -523,6 +557,7 @@ def build_dubbed_audio(
         "ducking": ducking,
         "target_lufs": target_lufs,
         "lufs_applied": lufs_applied,
+        "warnings": [w for w in [background_warning, lufs_warning] if w],
     }
 
 
@@ -553,7 +588,19 @@ def main() -> int:
                         help="lower background volume "
                              "where dubbed speech is present")
     parser.add_argument("--target-lufs", type=float, default=None,
-                        help="apply EBU R128 LUFS normalization (-16=web, -23=broadcast)")
+                        help="apply EBU R128 LUFS normalization "
+                             "(-16=web, -23=broadcast)")
+    parser.add_argument("--background-timeout", type=int, default=300,
+                        help="ffmpeg timeout for background audio "
+                             "extraction in seconds (default 300)")
+    parser.add_argument("--lufs-timeout", type=int, default=600,
+                        help="ffmpeg timeout for LUFS normalization "
+                             "in seconds (default 600)")
+    parser.add_argument("--fail-if-background-mix-fails",
+                        action="store_true",
+                        help="raise an error if background audio "
+                             "mixing fails instead of silently "
+                             "producing speech-only output")
     args = parser.parse_args()
 
     manifest_path = Path(args.manifest).expanduser().resolve()
@@ -564,7 +611,8 @@ def main() -> int:
 
     try:
         report = build_dubbed_audio(
-            manifest_path, input_video, output_audio, args.sample_rate, args.allow_partial,
+            manifest_path, input_video, output_audio,
+            args.sample_rate, args.allow_partial,
             background_volume=args.background_volume,
             voice_volume=args.voice_volume,
             final_gain=args.final_gain,
@@ -572,6 +620,9 @@ def main() -> int:
             vocal_separation=args.vocal_separation,
             ducking=args.ducking,
             target_lufs=args.target_lufs,
+            background_timeout=args.background_timeout,
+            lufs_timeout=args.lufs_timeout,
+            fail_if_background_mix_fails=args.fail_if_background_mix_fails,
         )
         print("Build dubbed audio: PASS")
         print(f"Output: {output_audio}")

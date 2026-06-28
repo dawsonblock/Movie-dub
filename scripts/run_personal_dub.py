@@ -140,6 +140,12 @@ def main() -> int:
                         help="lower background volume where dubbed speech is present")
     parser.add_argument("--target-lufs", type=float, default=None,
                         help="apply EBU R128 LUFS normalization (-16=web, -23=broadcast)")
+    parser.add_argument("--background-timeout", type=int, default=300,
+                        help="ffmpeg timeout for background extraction (seconds)")
+    parser.add_argument("--lufs-timeout", type=int, default=600,
+                        help="ffmpeg timeout for LUFS normalization (seconds)")
+    parser.add_argument("--fail-if-background-mix-fails", action="store_true",
+                        help="fail if background audio mixing fails instead of silent speech-only output")
     args = parser.parse_args()
 
     input_video = Path(args.input).expanduser().resolve()
@@ -302,6 +308,12 @@ def main() -> int:
             build_cmd.append("--ducking")
         if args.target_lufs is not None:
             build_cmd.extend(["--target-lufs", str(args.target_lufs)])
+        if args.background_timeout != 300:
+            build_cmd.extend(["--background-timeout", str(args.background_timeout)])
+        if args.lufs_timeout != 600:
+            build_cmd.extend(["--lufs-timeout", str(args.lufs_timeout)])
+        if args.fail_if_background_mix_fails:
+            build_cmd.append("--fail-if-background-mix-fails")
         build_result = run_subprocess(build_cmd, ROOT, "build-dubbed-audio")
         if build_result.returncode != 0 or not dubbed_audio.is_file():
             raise RuntimeError(f"dubbed audio build failed: {build_result.stderr[-1500:]}")

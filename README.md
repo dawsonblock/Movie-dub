@@ -123,6 +123,19 @@ Audio quality flags:
 | `--vocal-separation` | off | Remove center-channel vocals from background audio (karaoke-style) |
 | `--ducking` | off | Lower background volume where dubbed speech is present |
 | `--target-lufs` | off | EBU R128 LUFS normalization (-16 = web/streaming, -23 = broadcast) |
+| `--background-timeout` | `300` | FFmpeg timeout for background audio extraction (seconds) |
+| `--lufs-timeout` | `600` | FFmpeg timeout for LUFS normalization (seconds) |
+| `--fail-if-background-mix-fails` | off | Fail hard if background mixing fails instead of silently producing speech-only output |
+
+**Note on `--voice-volume`:** With default peak normalization, increasing
+`--voice-volume` changes the voice-to-background balance but the final peak
+is still normalized to 0.97. For absolute level control, use
+`--no-normalize --voice-volume 1.2 --final-gain 0.9`.
+
+If background mixing or LUFS normalization fails (e.g. timeout on a long
+video), a warning is printed to stderr and the report includes a `warnings`
+list. Use `--fail-if-background-mix-fails` to make background mix failures
+hard errors instead of silent fallbacks.
 
 For normal use, `--background-volume 0.15` is enough. For movies with music:
 

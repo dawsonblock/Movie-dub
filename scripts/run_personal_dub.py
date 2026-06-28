@@ -128,6 +128,12 @@ def main() -> int:
                         help="allow the final remux even if some segments failed")
     parser.add_argument("--background-volume", type=float, default=0.0,
                         help="mix original audio at this volume (0.0=off, 0.15=quiet bg, 1.0=full)")
+    parser.add_argument("--voice-volume", type=float, default=1.0,
+                        help="gain for dubbed speech (1.0=normal, 1.5=louder, 0.5=quieter)")
+    parser.add_argument("--final-gain", type=float, default=1.0,
+                        help="gain applied after normalization (1.0=no change)")
+    parser.add_argument("--no-normalize", action="store_true",
+                        help="skip peak normalization (use with --final-gain for manual control)")
     args = parser.parse_args()
 
     input_video = Path(args.input).expanduser().resolve()
@@ -278,6 +284,12 @@ def main() -> int:
             build_cmd.append("--allow-partial")
         if args.background_volume > 0:
             build_cmd.extend(["--background-volume", str(args.background_volume)])
+        if args.voice_volume != 1.0:
+            build_cmd.extend(["--voice-volume", str(args.voice_volume)])
+        if args.final_gain != 1.0:
+            build_cmd.extend(["--final-gain", str(args.final_gain)])
+        if args.no_normalize:
+            build_cmd.append("--no-normalize")
         build_result = run_subprocess(build_cmd, ROOT, "build-dubbed-audio")
         if build_result.returncode != 0 or not dubbed_audio.is_file():
             raise RuntimeError(f"dubbed audio build failed: {build_result.stderr[-1500:]}")

@@ -42,7 +42,7 @@ python -m pip install \
   cn2an \
   jieba \
   langid
-python -m pip install "git+https://github.com/myshell-ai/MeloTTS.git"
+python -m pip install "git+https://github.com/myshell-ai/MeloTTS.git@209145371cff8fc3bd60d7be902ea69cbdb7965a"
 python -m unidic download
 
 python - <<'PY'

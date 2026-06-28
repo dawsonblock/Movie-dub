@@ -1,7 +1,16 @@
-.PHONY: doctor setup-ffmpeg setup-pyvt setup-openvoice setup-checkpoints download-openvoice smoke-openvoice smoke-e2e test-openvoice test-pyvt dub
+.PHONY: doctor setup-ffmpeg setup-pyvt setup-openvoice setup-checkpoints download-openvoice smoke-openvoice smoke-e2e test-openvoice test-pyvt dub proof
 
 doctor:
 	python3 scripts/doctor.py
+
+# Run all four pass gates in sequence. All must pass.
+proof:
+	@echo "=== 1/4 doctor ===" && python3 scripts/doctor.py | tail -3
+	@echo "=== 2/4 smoke-openvoice ===" && python3 scripts/smoke_openvoice_bridge.py
+	@echo "=== 3/4 smoke-e2e ===" && python3 scripts/smoke_e2e_short_clip.py
+	@echo "=== 4/4 test-pyvt ===" && cd pyvideotrans-main && .venv/bin/python -m pytest -q
+	@echo ""
+	@echo "PROOF: PASS"
 
 setup-ffmpeg:
 	bash scripts/setup_ffmpeg_mac.sh
@@ -32,7 +41,8 @@ test-pyvt:
 
 # Personal dubbing wrapper. Usage:
 #   make dub INPUT=~/Movies/test.mp4 OUTPUT=~/Movies/dubbed-test.mp4
-# Optional: SOURCE=en TARGET=en REFERENCE=voices/openvoice_default_reference.wav BACKGROUND_VOLUME=0.15
+# Optional: SOURCE=en TARGET=en REFERENCE=voices/openvoice_default_reference.wav
+#           BACKGROUND_VOLUME=0.15 VOICE_VOLUME=1.0 FINAL_GAIN=1.0 NO_NORMALIZE=1
 dub:
 	@if [ -z "$(INPUT)" ] || [ -z "$(OUTPUT)" ]; then \
 		echo "Usage: make dub INPUT=<input.mp4> OUTPUT=<output.mp4>"; \
@@ -44,4 +54,7 @@ dub:
 		--target-language $(or $(TARGET),en) \
 		--reference $(or $(REFERENCE),voices/openvoice_default_reference.wav) \
 		--output "$(OUTPUT)" \
-		$(if $(BACKGROUND_VOLUME),--background-volume $(BACKGROUND_VOLUME))
+		$(if $(BACKGROUND_VOLUME),--background-volume $(BACKGROUND_VOLUME)) \
+		$(if $(VOICE_VOLUME),--voice-volume $(VOICE_VOLUME)) \
+		$(if $(FINAL_GAIN),--final-gain $(FINAL_GAIN)) \
+		$(if $(NO_NORMALIZE),--no-normalize)

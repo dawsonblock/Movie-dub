@@ -96,7 +96,7 @@ Optional flags:
 ```bash
 make dub INPUT=~/Movies/test.mp4 OUTPUT=~/Movies/dubbed-test.mp4 \
      SOURCE=en TARGET=en REFERENCE=voices/openvoice_default_reference.wav \
-     BACKGROUND_VOLUME=0.15
+     BACKGROUND_VOLUME=0.15 VOICE_VOLUME=1.2
 ```
 
 Or call the script directly:
@@ -108,12 +108,22 @@ python scripts/run_personal_dub.py \
   --target-language en \
   --reference voices/openvoice_default_reference.wav \
   --output ~/Movies/dubbed-test.mp4 \
-  --background-volume 0.15
+  --background-volume 0.15 \
+  --voice-volume 1.2
 ```
 
-`--background-volume` mixes the original audio (music, ambience) under the
-dubbed speech at the given volume. `0.0` (default) replaces the whole audio
-track with speech. `0.15` keeps background audio quiet under the dub.
+Audio quality flags:
+
+| Flag | Default | What it does |
+|------|---------|--------------|
+| `--background-volume` | `0.0` | Original audio mix level (0.15 = quiet bg under dub) |
+| `--voice-volume` | `1.0` | Gain on dubbed speech (1.5 = louder, 0.5 = quieter) |
+| `--final-gain` | `1.0` | Gain applied after normalization (1.0 = no change) |
+| `--no-normalize` | off | Skip peak normalization — use with `--final-gain` for manual level control |
+
+For normal use, `--background-volume 0.15` is enough. Use `--voice-volume`
+if the dubbed speech is too quiet or too loud relative to the background.
+Use `--no-normalize` + `--final-gain` only if you need manual level control.
 
 The wrapper runs the full pyVideoTrans VTV pipeline with OpenVoice, then
 rebuilds the dubbed audio track from the manifest and remuxes it into the

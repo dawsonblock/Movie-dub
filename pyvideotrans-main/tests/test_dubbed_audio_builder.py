@@ -198,3 +198,147 @@ def test_skipped_status_fails_without_allow_partial(tmp_path):
         build_dubbed_audio_from_manifest.build_dubbed_audio(
             manifest_path, TEST_VIDEO, output_audio
         )
+
+
+def _read_wav_peak(path: Path) -> float:
+    """Read a WAV file and return the max absolute sample value."""
+    with wave.open(path.as_posix(), "rb") as wav:
+        n = wav.getnframes()
+        sw = wav.getsampwidth()
+        data = wav.readframes(n)
+    if sw == 2:
+        import array
+        arr = array.array("h", data)
+        return max(abs(v) for v in arr) / 32768.0
+    return 0.0
+
+
+def test_voice_volume_increases_peak(tmp_path):
+    """--voice-volume > 1.0 should produce a louder output than 1.0."""
+    gen = tmp_path / "generated_audio"
+    _write_tone_wav(gen / "000001.wav", 1.0)
+    manifest = {
+        "ok": 1, "error": 0, "skipped": 0,
+        "segments": [
+            {"id": 1, "status": "ok", "start": 0.0, "end": 1.0,
+             "output_audio": (gen / "000001.wav").as_posix()},
+        ],
+    }
+    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    normal_out = tmp_path / "normal.wav"
+    loud_out = tmp_path / "loud.wav"
+
+    build_dubbed_audio_from_manifest.build_dubbed_audio(
+        manifest_path, TEST_VIDEO, normal_out, voice_volume=1.0
+    )
+    build_dubbed_audio_from_manifest.build_dubbed_audio(
+        manifest_path, TEST_VIDEO, loud_out, voice_volume=2.0
+    )
+
+    # Both are normalized to 0.97 peak, so we need to test with --no-normalize
+    # to see the voice_volume effect
+    normal_raw = tmp_path / "normal_raw.wav"
+    loud_raw = tmp_path / "loud_raw.wav"
+    build_dubbed_audio_from_manifest.build_dubbed_audio(
+        manifest_path, TEST_VIDEO, normal_raw,
+        voice_volume=1.0, no_normalize=True
+    )
+    build_dubbed_audio_from_manifest.build_dubbed_audio(
+        manifest_path, TEST_VIDEO, loud_raw,
+        voice_volume=2.0, no_normalize=True
+    )
+
+    normal_peak = _read_wav_peak(normal_raw)
+    loud_peak = _read_wav_peak(loud_raw)
+    assert loud_peak > normal_peak, f"loud ({loud_peak}) should > normal ({normal_peak})"
+
+
+def test_no_normalize_keeps_lower_peak(tmp_path):
+    """With --no-normalize, the peak should be lower than with normalization."""
+    gen = tmp_path / "generated_audio"
+    _write_tone_wav(gen / "000001.wav", 1.0)
+    manifest = {
+        "ok": 1, "error": 0, "skipped": 0,
+        "segments": [
+            {"id": 1, "status": "ok", "start": 0.0, "end": 1.0,
+             "output_audio": (gen / "000001.wav").as_posix()},
+        ],
+    }
+    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    norm_out = tmp_path / "normalized.wav"
+    raw_out = tmp_path / "raw.wav"
+
+    build_dubbed_audio_from_manifest.build_dubbed_audio(
+        manifest_path, TEST_VIDEO, norm_out
+    )
+    build_dubbed_audio_from_manifest.build_dubbed_audio(
+        manifest_path, TEST_VIDEO, raw_out, no_normalize=True
+    )
+
+    norm_peak = _read_wav_peak(norm_out)
+    raw_peak = _read_wav_peak(raw_out)
+    # Normalized output should be at target peak (~0.97)
+    assert norm_peak > 0.9, f"normalized peak {norm_peak} should be near 0.97"
+    # Raw output should be lower (not normalized to 0.97)
+    assert raw_peak < norm_peak, f"raw ({raw_peak}) should < normalized ({norm_peak})"
+
+
+def test_final_gain_affects_output_level(tmp_path):
+    """--final-gain should scale the output level."""
+    gen = tmp_path / "generated_audio"
+    _write_tone_wav(gen / "000001.wav", 1.0)
+    manifest = {
+        "ok": 1, "error": 0, "skipped": 0,
+        "segments": [
+            {"id": 1, "status": "ok", "start": 0.0, "end": 1.0,
+             "output_audio": (gen / "000001.wav").as_posix()},
+        ],
+    }
+    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    # Use no_normalize so final_gain is the only gain control
+    low_out = tmp_path / "low.wav"
+    high_out = tmp_path / "high.wav"
+
+    build_dubbed_audio_from_manifest.build_dubbed_audio(
+        manifest_path, TEST_VIDEO, low_out,
+        no_normalize=True, final_gain=0.5
+    )
+    build_dubbed_audio_from_manifest.build_dubbed_audio(
+        manifest_path, TEST_VIDEO, high_out,
+        no_normalize=True, final_gain=1.0
+    )
+
+    low_peak = _read_wav_peak(low_out)
+    high_peak = _read_wav_peak(high_out)
+    assert high_peak > low_peak, f"gain=1.0 ({high_peak}) should > gain=0.5 ({low_peak})"
+
+
+def test_report_includes_audio_quality_fields(tmp_path):
+    """The build report should include voice_volume, final_gain, no_normalize."""
+    gen = tmp_path / "generated_audio"
+    _write_tone_wav(gen / "000001.wav", 1.0)
+    manifest = {
+        "ok": 1, "error": 0, "skipped": 0,
+        "segments": [
+            {"id": 1, "status": "ok", "start": 0.0, "end": 1.0,
+             "output_audio": (gen / "000001.wav").as_posix()},
+        ],
+    }
+    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    output_audio = tmp_path / "dubbed_audio.wav"
+
+    report = build_dubbed_audio_from_manifest.build_dubbed_audio(
+        manifest_path, TEST_VIDEO, output_audio,
+        voice_volume=1.5, final_gain=0.8, no_normalize=True
+    )
+
+    assert report["voice_volume"] == 1.5
+    assert report["final_gain"] == 0.8
+    assert report["no_normalize"] is True

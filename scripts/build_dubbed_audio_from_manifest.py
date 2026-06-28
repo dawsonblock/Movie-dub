@@ -300,6 +300,9 @@ def build_dubbed_audio(
     sample_rate: int = DEFAULT_SAMPLE_RATE,
     allow_partial: bool = False,
     background_volume: float = 0.0,
+    voice_volume: float = 1.0,
+    final_gain: float = 1.0,
+    no_normalize: bool = False,
 ) -> dict:
     manifest = read_json(manifest_path)
     segments = manifest_segments(manifest)
@@ -360,14 +363,14 @@ def build_dubbed_audio(
 
         if _have_soundfile():
             import numpy as np
-            seg_arr = np.asarray(samples, dtype="float32")
+            seg_arr = np.asarray(samples, dtype="float32") * voice_volume
             canvas[start_index:end_index] += seg_arr[: end_index - start_index]
         else:
             for i, v in enumerate(samples):
                 idx = start_index + i
                 if idx >= total_samples:
                     break
-                canvas[idx] += float(v)
+                canvas[idx] += float(v) * voice_volume
         placed += 1
 
     if placed == 0:
@@ -380,8 +383,21 @@ def build_dubbed_audio(
             canvas, input_video, sample_rate, total_samples, background_volume
         )
 
-    normalized = normalize(canvas)
-    write_audio_samples(output_audio, normalized, sample_rate)
+    if no_normalize:
+        # Skip peak normalization — apply final_gain directly
+        if _have_soundfile():
+            import numpy as np
+            final = np.asarray(canvas, dtype="float32") * final_gain
+        else:
+            final = [float(v) * final_gain for v in canvas]
+    else:
+        normalized = normalize(canvas)
+        if _have_soundfile():
+            import numpy as np
+            final = np.asarray(normalized, dtype="float32") * final_gain
+        else:
+            final = [float(v) * final_gain for v in normalized]
+    write_audio_samples(output_audio, final, sample_rate)
 
     return {
         "status": "ok",
@@ -397,6 +413,9 @@ def build_dubbed_audio(
         "errors": errors,
         "background_volume": background_volume,
         "background_mix": background_mix,
+        "voice_volume": voice_volume,
+        "final_gain": final_gain,
+        "no_normalize": no_normalize,
     }
 
 
@@ -410,6 +429,12 @@ def main() -> int:
     parser.add_argument("--allow-partial", action="store_true")
     parser.add_argument("--background-volume", type=float, default=0.0,
                         help="mix original audio at this volume (0.0=off, 0.15=quiet bg, 1.0=full)")
+    parser.add_argument("--voice-volume", type=float, default=1.0,
+                        help="gain applied to dubbed speech segments (1.0=normal, 1.5=louder, 0.5=quieter)")
+    parser.add_argument("--final-gain", type=float, default=1.0,
+                        help="gain applied to the final mix after normalization (1.0=no change)")
+    parser.add_argument("--no-normalize", action="store_true",
+                        help="skip peak normalization (use with --final-gain for manual level control)")
     args = parser.parse_args()
 
     manifest_path = Path(args.manifest).expanduser().resolve()
@@ -422,6 +447,9 @@ def main() -> int:
         report = build_dubbed_audio(
             manifest_path, input_video, output_audio, args.sample_rate, args.allow_partial,
             background_volume=args.background_volume,
+            voice_volume=args.voice_volume,
+            final_gain=args.final_gain,
+            no_normalize=args.no_normalize,
         )
         print("Build dubbed audio: PASS")
         print(f"Output: {output_audio}")
@@ -429,6 +457,12 @@ def main() -> int:
         print(f"Duration: {report['video_duration']:.3f}s @ {report['sample_rate']}Hz")
         if args.background_volume > 0:
             print(f"Background volume: {args.background_volume}")
+        if args.voice_volume != 1.0:
+            print(f"Voice volume: {args.voice_volume}")
+        if args.final_gain != 1.0:
+            print(f"Final gain: {args.final_gain}")
+        if args.no_normalize:
+            print("Normalize: off")
         return 0
     except Exception as exc:
         print("Build dubbed audio: FAIL", file=sys.stderr)

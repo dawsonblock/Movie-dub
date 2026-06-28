@@ -26,8 +26,22 @@ if [ ! -d "$VENV_DIR" ]; then
 fi
 
 source "$VENV_DIR/bin/activate"
-python -m pip install -U pip wheel setuptools
-python -m pip install -e .
+python -m pip install -U pip wheel "setuptools<82"
+python -m pip install --no-deps -e .
+python -m pip install \
+  "numpy<2" \
+  torch \
+  soundfile \
+  librosa \
+  pydub \
+  wavmark \
+  eng_to_ipa \
+  inflect \
+  unidecode \
+  pypinyin \
+  cn2an \
+  jieba \
+  langid
 python -m pip install "git+https://github.com/myshell-ai/MeloTTS.git"
 python -m unidic download
 

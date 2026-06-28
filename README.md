@@ -52,9 +52,17 @@ OpenVoice-main/checkpoints_v2/
 make setup-ffmpeg
 make setup-pyvt
 make setup-openvoice
+make download-openvoice
 ```
 
-Checkpoints are not committed to git. Place them under `OpenVoice-main/checkpoints_v2`, then run:
+Checkpoints are not committed to git and are only downloaded when you explicitly run `make download-openvoice`.
+The default checkpoint repo is `rsxdalv/OpenVoiceV2`. To use a personal mirror or bucket:
+
+```bash
+OPENVOICE_HF_REPO=DmanBlock/OpenVoiceV2-bucket make download-openvoice
+```
+
+Then run:
 
 ```bash
 make doctor

@@ -4,18 +4,22 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import py_compile
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PYVIDEOTRANS = ROOT / "pyvideotrans-main"
 OPENVOICE = ROOT / "OpenVoice-main"
+DEFAULT_HF_REPO = "rsxdalv/OpenVoiceV2"
+MIN_CONVERTER_CHECKPOINT_BYTES = 100_000_000
+LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec"
 PYTHON310_CANDIDATES = [
     Path(os.environ["PYTHON_BIN"]) if "PYTHON_BIN" in os.environ else None,
     Path(shutil.which("python3.10")) if shutil.which("python3.10") else None,
@@ -88,6 +92,21 @@ def binary_check(section: str, name: str, binary: str, local_path: Path | None =
     return check(section, name, ok, f"{found} ({detail})")
 
 
+def command_check(section: str, name: str, cmd: list[str], required: bool = True) -> Check:
+    found = shutil.which(cmd[0])
+    if not found:
+        return check(section, name, False, f"{cmd[0]} not found on PATH", required)
+    ok, detail = run(cmd)
+    return check(section, name, ok, detail, required)
+
+
+def git_xet_check(required: bool = True) -> Check:
+    if shutil.which("git-xet"):
+        return check("Checkpoints", "git-xet", True, shutil.which("git-xet") or "git-xet", required)
+    ok, detail = run(["git", "xet", "--help"], timeout=15)
+    return check("Checkpoints", "git-xet", ok, detail if ok else "git xet not installed", required)
+
+
 def python310_binary_check() -> Check:
     for candidate in PYTHON310_CANDIDATES:
         if candidate and candidate.is_file():
@@ -118,10 +137,52 @@ def base_speaker_check(checkpoint_dir: Path) -> Check:
     )
 
 
+def converter_checkpoint_real_file_check(checkpoint_path: Path) -> Check:
+    if not checkpoint_path.is_file():
+        return check("Models", "converter checkpoint real file", False, f"missing: {checkpoint_path}")
+    try:
+        size = checkpoint_path.stat().st_size
+        prefix = checkpoint_path.read_bytes()[:200]
+    except OSError as exc:
+        return check("Models", "converter checkpoint real file", False, str(exc))
+    if prefix.startswith(LFS_POINTER_PREFIX) or LFS_POINTER_PREFIX in prefix:
+        return check(
+            "Models",
+            "converter checkpoint real file",
+            False,
+            f"Git LFS/Xet pointer stub, not model data: {checkpoint_path}",
+        )
+    if size < MIN_CONVERTER_CHECKPOINT_BYTES:
+        return check(
+            "Models",
+            "converter checkpoint real file",
+            False,
+            f"suspiciously small: {size} bytes; expected about 131 MB",
+        )
+    return check("Models", "converter checkpoint real file", True, f"{size} bytes")
+
+
+def checkpoint_dir() -> Path:
+    raw = os.environ.get("OPENVOICE_CHECKPOINT_DIR")
+    return Path(raw).expanduser().resolve() if raw else OPENVOICE / "checkpoints_v2"
+
+
+def checkpoints_ready(checkpoint_path: Path) -> bool:
+    speaker_dir = checkpoint_path / "base_speakers" / "ses"
+    return (
+        (checkpoint_path / "converter" / "config.json").is_file()
+        and (checkpoint_path / "converter" / "checkpoint.pth").is_file()
+        and converter_checkpoint_real_file_check(checkpoint_path / "converter" / "checkpoint.pth").ok
+        and speaker_dir.is_dir()
+        and any(speaker_dir.glob("*.pth"))
+    )
+
+
 def collect_checks() -> list[Check]:
     py_python = PYVIDEOTRANS / ".venv" / "bin" / "python"
     ov_python = OPENVOICE / ".venv" / "bin" / "python"
-    checkpoint_dir = OPENVOICE / "checkpoints_v2"
+    ov_checkpoint_dir = checkpoint_dir()
+    checkpoint_tools_required = not checkpoints_ready(ov_checkpoint_dir)
 
     return [
         check("System", "macOS", sys.platform == "darwin", sys.platform),
@@ -144,15 +205,57 @@ def collect_checks() -> list[Check]:
         import_check("OpenVoice", ov_python, "melo", cwd=OPENVOICE),
         import_check("OpenVoice", ov_python, "soundfile", cwd=OPENVOICE),
         import_check("OpenVoice", ov_python, "unidic", cwd=OPENVOICE),
-        file_check("Models", "converter config", checkpoint_dir / "converter" / "config.json"),
-        file_check("Models", "converter checkpoint", checkpoint_dir / "converter" / "checkpoint.pth"),
-        base_speaker_check(checkpoint_dir),
+        command_check("Checkpoints", "hf CLI", ["hf", "--help"], required=checkpoint_tools_required),
+        git_xet_check(required=checkpoint_tools_required),
+        check(
+            "Checkpoints",
+            "Hugging Face repo",
+            bool(os.environ.get("OPENVOICE_HF_REPO", DEFAULT_HF_REPO).strip()),
+            os.environ.get("OPENVOICE_HF_REPO", DEFAULT_HF_REPO),
+            required=checkpoint_tools_required,
+        ),
+        file_check("Models", "converter config", ov_checkpoint_dir / "converter" / "config.json"),
+        file_check("Models", "converter checkpoint", ov_checkpoint_dir / "converter" / "checkpoint.pth"),
+        converter_checkpoint_real_file_check(ov_checkpoint_dir / "converter" / "checkpoint.pth"),
+        base_speaker_check(ov_checkpoint_dir),
         file_check("Bridge", "bridge script", ROOT / "bridge" / "openvoice_segment_tts.py"),
         bridge_compile_check(),
         file_check("Bridge", "OpenVoice smoke script", ROOT / "scripts" / "smoke_openvoice_bridge.py"),
         file_check("Assets", "test MP4", ROOT / "assets" / "pyvideotrans_test_clip.mp4"),
         file_check("Assets", "default reference WAV", ROOT / "voices" / "openvoice_default_reference.wav"),
     ]
+
+
+def summarize(checks: list[Check], strict: bool = False) -> dict:
+    required_failures = [item for item in checks if item.required and not item.ok]
+    optional_warnings = [item for item in checks if not item.required and not item.ok]
+    ready = not required_failures and (not strict or not optional_warnings)
+    return {
+        "ready": ready,
+        "required_failures": len(required_failures),
+        "optional_warnings": len(optional_warnings),
+        "checks": [asdict(item) for item in checks],
+    }
+
+
+def checkpoint_failures(checks: list[Check]) -> bool:
+    return any(item.section == "Models" and not item.ok for item in checks)
+
+
+def print_checkpoint_instructions() -> None:
+    target = checkpoint_dir()
+    print()
+    print("Checkpoints missing. Run:")
+    print("  make download-openvoice")
+    print("Expected layout:")
+    print(f"  {target / 'converter' / 'config.json'}")
+    print(f"  {target / 'converter' / 'checkpoint.pth'}")
+    print(f"  {target / 'base_speakers' / 'ses' / '*.pth'}")
+    print("Install download tooling if needed:")
+    print("  brew install uv")
+    print("  uvx hf download rsxdalv/OpenVoiceV2 --local-dir OpenVoice-main --include 'checkpoints_v2/*'")
+    print("Or install the Hugging Face CLI from huggingface_hub:")
+    print("  python3 -m pip install -U huggingface_hub")
 
 
 def print_table(checks: list[Check]) -> None:
@@ -166,17 +269,22 @@ def print_table(checks: list[Check]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check local pyVideoTrans + OpenVoice readiness")
     parser.add_argument("--strict", action="store_true", help="return nonzero for optional warnings too")
+    parser.add_argument("--json", action="store_true", help="print machine-readable readiness JSON")
     args = parser.parse_args()
     checks = collect_checks()
+    summary = summarize(checks, strict=args.strict)
+    if args.json:
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 0 if summary["ready"] else 1
+
     print_table(checks)
-    required_failures = [item for item in checks if item.required and not item.ok]
-    optional_warnings = [item for item in checks if not item.required and not item.ok]
-    ready = not required_failures and (not args.strict or not optional_warnings)
+    if checkpoint_failures(checks):
+        print_checkpoint_instructions()
     print()
-    print(f"READY: {'yes' if ready else 'no'}")
-    print(f"Required failures: {len(required_failures)}")
-    print(f"Optional warnings: {len(optional_warnings)}")
-    return 0 if ready else 1
+    print(f"READY: {'yes' if summary['ready'] else 'no'}")
+    print(f"Required failures: {summary['required_failures']}")
+    print(f"Optional warnings: {summary['optional_warnings']}")
+    return 0 if summary["ready"] else 1
 
 
 if __name__ == "__main__":

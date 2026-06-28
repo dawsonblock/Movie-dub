@@ -1,4 +1,4 @@
-.PHONY: doctor setup-ffmpeg setup-pyvt setup-openvoice smoke-openvoice smoke-e2e test-openvoice test-pyvt
+.PHONY: doctor setup-ffmpeg setup-pyvt setup-openvoice setup-checkpoints download-openvoice smoke-openvoice smoke-e2e test-openvoice test-pyvt
 
 doctor:
 	python3 scripts/doctor.py
@@ -11,6 +11,12 @@ setup-pyvt:
 
 setup-openvoice:
 	bash scripts/setup_openvoice_mac.sh
+
+setup-checkpoints:
+	python3 scripts/setup_openvoice_checkpoints.py
+
+download-openvoice:
+	bash scripts/download_openvoice_v2_checkpoints.sh
 
 smoke-openvoice:
 	python3 scripts/smoke_openvoice_bridge.py

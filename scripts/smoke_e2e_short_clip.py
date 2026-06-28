@@ -19,6 +19,7 @@ JOB_DIR = PYVIDEOTRANS / "tmp" / "e2e_short_clip"
 OUTPUT_DIR = JOB_DIR / "output"
 REPORT_PATH = JOB_DIR / "report.json"
 REVIEW_PATH = JOB_DIR / "review_segments.json"
+REMUX_PATH = JOB_DIR / "remux_command.json"
 
 
 def local_ffprobe() -> str:
@@ -62,6 +63,15 @@ def latest_queue(start_time: float) -> Path | None:
     return latest_artifact(start_time, "**/openvoice-queue-*.json")
 
 
+def newest_mp4(output_dir: Path, start_time: float) -> Path | None:
+    candidates = [
+        path
+        for path in output_dir.rglob("*.mp4")
+        if path.is_file() and path.stat().st_mtime >= start_time
+    ]
+    return max(candidates, key=lambda path: path.stat().st_mtime) if candidates else None
+
+
 def extract_manifest_from_output(text: str) -> dict | None:
     decoder = json.JSONDecoder()
     for index, char in enumerate(text):
@@ -101,6 +111,12 @@ def parse_srt(path: Path) -> list[dict]:
 def write_report(report: dict) -> None:
     JOB_DIR.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def write_remux_command(final_video: Path) -> None:
+    relative_video = final_video.relative_to(JOB_DIR) if final_video.is_relative_to(JOB_DIR) else final_video
+    command = ["/bin/cp", relative_video.as_posix(), "final_dubbed.mp4"]
+    REMUX_PATH.write_text(json.dumps(command, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def write_review_file(queue_file: Path | None, manifest_file: Path | None, srt_file: Path) -> None:
@@ -207,7 +223,7 @@ def main() -> int:
         "--verbose",
     ]
     result = subprocess.run(cmd, cwd=PYVIDEOTRANS, text=True, capture_output=True)
-    final_video = OUTPUT_DIR / INPUT_VIDEO.name
+    final_video = newest_mp4(OUTPUT_DIR, started) or OUTPUT_DIR / INPUT_VIDEO.name
     manifest = latest_manifest(started)
     queue_file = latest_queue(started)
     stable_manifest = JOB_DIR / "openvoice_manifest.json"
@@ -229,6 +245,7 @@ def main() -> int:
         "device": "",
         "manifest": manifest.as_posix() if manifest else "",
         "review_segments": REVIEW_PATH.as_posix(),
+        "remux_command": REMUX_PATH.as_posix(),
         "stdout_tail": result.stdout[-4000:],
         "stderr_tail": result.stderr[-4000:],
     }
@@ -257,6 +274,7 @@ def main() -> int:
         if report["segments_ok"] < 1:
             raise RuntimeError("OpenVoice manifest has no successful segment")
         write_review_file(queue_file, manifest, OUTPUT_DIR / "en.srt")
+        write_remux_command(final_video)
         report["status"] = "pass"
         report["duration_seconds"] = duration
         write_report(report)

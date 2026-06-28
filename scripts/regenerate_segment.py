@@ -119,6 +119,8 @@ def main() -> int:
                         results.append(replacement)
                     manifest["ok"] = len([item for item in results if item.get("status") == "ok"])
                     manifest["error"] = len([item for item in results if item.get("status") == "error"])
+                    manifest["skipped"] = len([item for item in results if item.get("status") == "skipped_empty_text"])
+                    manifest["skipped_empty_text"] = manifest["skipped"]
                     manifest["last_regenerated_segment"] = args.segment_id
                     write_json(manifest_file, manifest)
 

@@ -62,10 +62,10 @@ def duration_status(generated_duration: float | None, target_duration: float | N
     return ratio, "minor_timing_mismatch"
 
 
-def return_code_for_counts(ok: int, err: int) -> int:
-    if ok > 0 and err == 0:
+def return_code_for_counts(ok: int, err: int, skipped: int = 0) -> int:
+    if ok > 0 and err == 0 and skipped == 0:
         return 0
-    if ok > 0 and err > 0:
+    if ok > 0 and (err > 0 or skipped > 0):
         return 2
     return 3
 
@@ -219,6 +219,7 @@ def synthesize_segments(args: argparse.Namespace) -> int:
     results: list[dict[str, Any]] = []
     ok = 0
     err = 0
+    skipped = 0
 
     for index, item in enumerate(queue):
         segment_id = item.get("line", item.get("id", index + 1))
@@ -232,6 +233,7 @@ def synthesize_segments(args: argparse.Namespace) -> int:
         }
         if not text:
             result["status"] = "skipped_empty_text"
+            skipped += 1
             results.append(result)
             continue
         if not output_audio:
@@ -311,6 +313,8 @@ def synthesize_segments(args: argparse.Namespace) -> int:
         "created_at": time.time(),
         "ok": ok,
         "error": err,
+        "skipped": skipped,
+        "skipped_empty_text": skipped,
         "language": language,
         "base_speaker": base_speaker,
         "device": device,
@@ -318,8 +322,8 @@ def synthesize_segments(args: argparse.Namespace) -> int:
         "results": results,
     }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    write_log(args.logs_file, f"OpenVoice finished: ok={ok}, error={err}")
-    return return_code_for_counts(ok, err)
+    write_log(args.logs_file, f"OpenVoice finished: ok={ok}, error={err}, skipped={skipped}")
+    return return_code_for_counts(ok, err, skipped)
 
 
 def build_parser() -> argparse.ArgumentParser:

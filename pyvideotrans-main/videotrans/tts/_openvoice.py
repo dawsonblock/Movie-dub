@@ -53,7 +53,8 @@ def _read_manifest(path: str) -> dict:
 
 def _partial_failure_message(manifest: dict, manifest_file: str) -> str:
     results = manifest.get("results") if isinstance(manifest, dict) else []
-    failed = [item for item in results if item.get("status") == "error"] if isinstance(results, list) else []
+    failed_statuses = {"error", "skipped_empty_text"}
+    failed = [item for item in results if item.get("status") in failed_statuses] if isinstance(results, list) else []
     failed_ids = [str(item.get("id", item.get("index", "?"))) for item in failed[:20]]
     suffix = ""
     if len(failed) > len(failed_ids):
@@ -61,7 +62,8 @@ def _partial_failure_message(manifest: dict, manifest_file: str) -> str:
     failed_text = ", ".join(failed_ids) + suffix if failed_ids else "unknown"
     return (
         f"OpenVoice partially succeeded: {manifest.get('ok', 0)}/{len(results) or '?'} segments generated. "
-        f"Failed segment IDs: {failed_text}. Manifest: {manifest_file}"
+        f"Failed/skipped segment IDs: {failed_text}. "
+        f"Errors: {manifest.get('error', 0)}, skipped: {manifest.get('skipped', 0)}. Manifest: {manifest_file}"
     )
 
 

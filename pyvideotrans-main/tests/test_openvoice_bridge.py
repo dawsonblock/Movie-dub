@@ -1,4 +1,6 @@
 import importlib.util
+import json
+import argparse
 from pathlib import Path
 
 import pytest
@@ -53,7 +55,48 @@ def test_validate_checkpoint_dir_requires_converter_files(tmp_path):
 
 
 def test_return_code_for_manifest_counts():
-    assert openvoice_segment_tts.return_code_for_counts(1, 0) == 0
-    assert openvoice_segment_tts.return_code_for_counts(1, 1) == 2
-    assert openvoice_segment_tts.return_code_for_counts(0, 0) == 3
-    assert openvoice_segment_tts.return_code_for_counts(0, 1) == 3
+    assert openvoice_segment_tts.return_code_for_counts(1, 0, 0) == 0
+    assert openvoice_segment_tts.return_code_for_counts(1, 1, 0) == 2
+    assert openvoice_segment_tts.return_code_for_counts(1, 0, 1) == 2
+    assert openvoice_segment_tts.return_code_for_counts(0, 0, 0) == 3
+    assert openvoice_segment_tts.return_code_for_counts(0, 1, 0) == 3
+    assert openvoice_segment_tts.return_code_for_counts(0, 0, 1) == 3
+
+
+def test_empty_text_segment_is_counted_as_skipped(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "checkpoints_v2"
+    converter = checkpoint_dir / "converter"
+    converter.mkdir(parents=True)
+    (converter / "config.json").write_text("{}", encoding="utf-8")
+    (converter / "checkpoint.pth").write_bytes(b"fake")
+    openvoice_repo = tmp_path / "OpenVoice-main"
+    openvoice_repo.mkdir()
+    queue_file = tmp_path / "queue.json"
+    manifest_file = tmp_path / "manifest.json"
+    queue_file.write_text(json.dumps([{"id": 7, "text": "", "filename": (tmp_path / "7.wav").as_posix()}]))
+
+    monkeypatch.setattr(openvoice_segment_tts, "resolve_device", lambda device: ("cpu", None))
+    monkeypatch.setattr(openvoice_segment_tts, "load_runtime", lambda *args, **kwargs: (None, None, None, 0, None, ""))
+
+    args = argparse.Namespace(
+        queue_tts_file=queue_file.as_posix(),
+        manifest_file=manifest_file.as_posix(),
+        work_dir=(tmp_path / "work").as_posix(),
+        openvoice_repo=openvoice_repo.as_posix(),
+        checkpoint_dir=checkpoint_dir.as_posix(),
+        default_reference="",
+        language="EN",
+        base_speaker="",
+        speed="1.0",
+        device="cpu",
+        logs_file="",
+        watermark="@MyShell",
+    )
+
+    assert openvoice_segment_tts.synthesize_segments(args) == 3
+    manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    assert manifest["ok"] == 0
+    assert manifest["error"] == 0
+    assert manifest["skipped"] == 1
+    assert manifest["skipped_empty_text"] == 1
+    assert manifest["results"][0]["status"] == "skipped_empty_text"

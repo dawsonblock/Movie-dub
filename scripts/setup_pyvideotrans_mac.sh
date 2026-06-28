@@ -30,7 +30,32 @@ python -m pip install -U pip wheel setuptools
 if command -v uv >/dev/null 2>&1 && [ -f "uv.lock" ]; then
   uv sync
 elif [ -f "pyproject.toml" ]; then
-  python -m pip install -e .
+  python -m pip install tomli
+  REQ_FILE="$(mktemp "${TMPDIR:-/tmp}/pyvideotrans-requirements.XXXXXX")"
+  export REQ_FILE
+  python - <<'PY'
+from pathlib import Path
+import os
+import sys
+
+import tomli
+
+data = tomli.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+deps = data.get("project", {}).get("dependencies", [])
+if not deps:
+    sys.exit("No project.dependencies found in pyproject.toml")
+Path(os.environ["REQ_FILE"]).write_text("\n".join(deps) + "\n", encoding="utf-8")
+PY
+  python -m pip install -r "$REQ_FILE"
+  rm -f "$REQ_FILE"
+  python - <<PY
+from pathlib import Path
+import site
+
+target = Path(site.getsitepackages()[0]) / "pyvideotrans-local.pth"
+target.write_text("$PYVT_DIR\n", encoding="utf-8")
+print(f"Local checkout path: {target}")
+PY
 elif [ -f "requirements.txt" ]; then
   python -m pip install -r requirements.txt
 else

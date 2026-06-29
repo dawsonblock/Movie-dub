@@ -1,6 +1,7 @@
 # 1. 获取并缓存可用 gpu 数量
 # 2. 获取可用 cuda 号
 # 3. MacOSX 是否支持 mps
+import os
 import platform
 from videotrans.configure.config import app_cfg,settings,logger
 
@@ -71,6 +72,8 @@ def get_cudaX() -> int:
 # cpu: 不支持，必须使用 cpu
 def mps_or_cpu() -> str:
     if platform.system() != 'Darwin':
+        return 'cpu'
+    if os.environ.get('PYTORCH_MPS_DISABLE') == '1':
         return 'cpu'
     import torch
     if torch.backends.mps.is_built() and torch.backends.mps.is_available():

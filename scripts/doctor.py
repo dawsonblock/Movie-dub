@@ -268,6 +268,15 @@ def collect_checks() -> list[Check]:
         file_check("Bridge", "OpenVoice smoke script", ROOT / "scripts" / "smoke_openvoice_bridge.py"),
         file_check("Assets", "test MP4", ROOT / "assets" / "pyvideotrans_test_clip.mp4"),
         file_check("Assets", "default reference WAV", ROOT / "voices" / "openvoice_default_reference.wav"),
+        # Optional: male/female reference voices for gender-based dubbing
+        file_check("Assets", "male reference WAV", ROOT / "voices" / "male_reference.wav", required=False),
+        file_check("Assets", "female reference WAV", ROOT / "voices" / "female_reference.wav", required=False),
+        # Optional: Demucs for AI-based vocal separation
+        import_check("Audio", py_python, "demucs", cwd=PYVIDEOTRANS),
+        # Optional: librosa for gender detection
+        import_check("Audio", py_python, "librosa", cwd=PYVIDEOTRANS),
+        # Optional: transformers for whisper-large-v3-turbo
+        import_check("Audio", py_python, "transformers", cwd=PYVIDEOTRANS),
     ]
 
 

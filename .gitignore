@@ -18,6 +18,9 @@
 # Local runtime data and model assets. Recreate these from the setup steps.
 /pyvideotrans-main/models/
 /pyvideotrans-main/tmp/
+
+# Dubbed output videos (large binary artifacts)
+/output/
 /pyvideotrans-main/output/
 /pyvideotrans-main/ffmpeg/ffmpeg
 /pyvideotrans-main/ffmpeg/ffprobe

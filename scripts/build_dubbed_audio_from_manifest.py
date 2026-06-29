@@ -255,17 +255,96 @@ def normalize(samples, target_peak: float = 0.97):
     return [float(v) * gain for v in samples]
 
 
+def _demucs_vocal_separation(
+    input_video: Path, output_dir: Path, timeout: int = 600
+) -> Path | None:
+    """Use Demucs (AI source separation) to extract instrumental/no-vocals track.
+
+    Demucs separates audio into stems: vocals, drums, bass, other.
+    We combine drums+bass+other into a single "no vocals" WAV.
+
+    Returns path to the no-vocals WAV, or None if separation failed.
+    """
+    # First extract audio from video
+    raw_audio = output_dir / "demucs_input.wav"
+    cmd = [
+        local_ffmpeg(), "-hide_banner", "-nostdin", "-y",
+        "-i", input_video.as_posix(),
+        "-vn",
+        "-ac", "2",
+        "-ar", "44100",
+        "-f", "wav",
+        raw_audio.as_posix(),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if result.returncode != 0 or not raw_audio.is_file():
+        return None
+
+    # Run Demucs separation
+    # demucs --two-stems vocals --name demucs_run -o <output_dir> <input>
+    # This creates: output_dir/demucs_run/<filename>/no_vocals.wav and vocals.wav
+    try:
+        import demucs  # noqa: F401 - just checking if demucs is available
+    except ImportError:
+        # Fall back to CLI
+        demucs_cmd = [
+            sys.executable, "-m", "demucs",
+            "--two-stems", "vocals",
+            "-n", "htdemucs",
+            "-o", output_dir.as_posix(),
+            raw_audio.as_posix(),
+        ]
+        result = subprocess.run(demucs_cmd, capture_output=True, text=True, timeout=timeout)
+        if result.returncode != 0:
+            return None
+    else:
+        # Use Python API
+        import torch
+        from demucs.pretrained import get_model
+        from demucs.apply import apply_model
+
+        device = "mps" if torch.backends.mps.is_available() else "cpu"
+        model = get_model("htdemucs")
+        model.to(device)
+
+        import torchaudio
+        wav, sr = torchaudio.load(raw_audio.as_posix())
+        wav = wav.unsqueeze(0).to(device)  # (1, channels, samples)
+        with torch.no_grad():
+            sources = apply_model(model, wav, split=True, overlap=0.25)
+        # sources shape: (1, n_sources, channels, samples)
+        # htdemucs: [drums, bass, other, vocals]
+        # no_vocals = drums + bass + other
+        no_vocals = sources[0, 0] + sources[0, 1] + sources[0, 2]
+        no_vocals_path = output_dir / "no_vocals.wav"
+        torchaudio.save(no_vocals_path.as_posix(), no_vocals.cpu(), sr)
+        raw_audio.unlink(missing_ok=True)
+        return no_vocals_path
+
+    # Find the no_vocals output from CLI
+    demucs_out = output_dir / "htdemucs" / "demucs_input"
+    no_vocals = demucs_out / "no_vocals.wav"
+    if no_vocals.is_file():
+        raw_audio.unlink(missing_ok=True)
+        return no_vocals
+    return None
+
+
 def _mix_background_audio(
     canvas, input_video: Path, sample_rate: int, total_samples: int, volume: float,
     vocal_separation: bool = False,
+    vocal_separation_method: str = "ffmpeg",
     ducking: bool = False,
     speech_regions: list[tuple[int, int]] | None = None,
     timeout: int = 300,
+    demucs_timeout: int = 600,
 ) -> bool:
     """Extract original audio from the input video and mix it under the speech canvas.
 
-    If vocal_separation is True, removes center-channel vocals from the
-    background before mixing (karaoke-style center removal via FFmpeg).
+    If vocal_separation is True, removes vocals from the background before mixing.
+    vocal_separation_method controls the technique:
+      - "ffmpeg": center-channel removal via pan filter (fast, lower quality)
+      - "demucs": AI-based source separation (slower, much better quality)
     If ducking is True, lowers the background volume where speech is present
     using a smooth envelope derived from speech_regions.
     Returns True if mixing succeeded.
@@ -274,11 +353,59 @@ def _mix_background_audio(
     import tempfile
 
     bg_path: Path | None = None
+    demucs_dir: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             bg_path = Path(tmp.name)
 
-        if vocal_separation:
+        if vocal_separation and vocal_separation_method == "demucs":
+            # Use Demucs AI-based vocal separation
+            demucs_dir = Path(tempfile.mkdtemp(prefix="demucs_"))
+            no_vocals = _demucs_vocal_separation(
+                input_video, demucs_dir, timeout=demucs_timeout
+            )
+            if no_vocals and no_vocals.is_file():
+                # Convert no_vocals to the target sample rate and mono
+                cmd = [
+                    local_ffmpeg(), "-hide_banner", "-nostdin", "-y",
+                    "-i", no_vocals.as_posix(),
+                    "-ac", "1",
+                    "-ar", str(sample_rate),
+                    "-f", "wav",
+                    bg_path.as_posix(),
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+                if result.returncode != 0 or not bg_path.is_file():
+                    # Fall back to ffmpeg pan filter
+                    cmd = [
+                        local_ffmpeg(), "-hide_banner", "-nostdin", "-y",
+                        "-i", input_video.as_posix(),
+                        "-vn",
+                        "-af", "pan=stereo|c0=c0-c1|c1=c1-c0",
+                        "-ac", "1",
+                        "-ar", str(sample_rate),
+                        "-f", "wav",
+                        bg_path.as_posix(),
+                    ]
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+                    if result.returncode != 0 or not bg_path.is_file():
+                        return False
+            else:
+                # Demucs failed, fall back to ffmpeg pan filter
+                cmd = [
+                    local_ffmpeg(), "-hide_banner", "-nostdin", "-y",
+                    "-i", input_video.as_posix(),
+                    "-vn",
+                    "-af", "pan=stereo|c0=c0-c1|c1=c1-c0",
+                    "-ac", "1",
+                    "-ar", str(sample_rate),
+                    "-f", "wav",
+                    bg_path.as_posix(),
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+                if result.returncode != 0 or not bg_path.is_file():
+                    return False
+        elif vocal_separation:
             # Remove center-channel vocals using FFmpeg's pan filter.
             # L-R and R-L cancel out centered (mono) vocals, leaving
             # mostly instrumental content. Downmix to mono afterward.
@@ -292,6 +419,9 @@ def _mix_background_audio(
                 "-f", "wav",
                 bg_path.as_posix(),
             ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            if result.returncode != 0 or not bg_path.is_file():
+                return False
         else:
             cmd = [
                 local_ffmpeg(), "-hide_banner", "-nostdin", "-y",
@@ -302,9 +432,9 @@ def _mix_background_audio(
                 "-f", "wav",
                 bg_path.as_posix(),
             ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        if result.returncode != 0 or not bg_path.is_file():
-            return False
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            if result.returncode != 0 or not bg_path.is_file():
+                return False
 
         bg_samples, _ = load_audio_samples(bg_path, sample_rate)
 
@@ -352,6 +482,8 @@ def _mix_background_audio(
     finally:
         if bg_path is not None:
             bg_path.unlink(missing_ok=True)
+        if demucs_dir is not None:
+            shutil.rmtree(demucs_dir, ignore_errors=True)
 
 
 def _apply_lufs_normalization(
@@ -404,11 +536,13 @@ def build_dubbed_audio(
     final_gain: float = 1.0,
     no_normalize: bool = False,
     vocal_separation: bool = False,
+    vocal_separation_method: str = "ffmpeg",
     ducking: bool = False,
     target_lufs: float | None = None,
     background_timeout: int = 300,
     lufs_timeout: int = 600,
     fail_if_background_mix_fails: bool = False,
+    demucs_timeout: int = 600,
 ) -> dict:
     manifest = read_json(manifest_path)
     segments = manifest_segments(manifest)
@@ -493,9 +627,11 @@ def build_dubbed_audio(
             canvas, input_video, sample_rate, total_samples,
             background_volume,
             vocal_separation=vocal_separation,
+            vocal_separation_method=vocal_separation_method,
             ducking=ducking,
             speech_regions=speech_regions if ducking else None,
             timeout=background_timeout,
+            demucs_timeout=demucs_timeout,
         )
         if not background_mix:
             background_warning = (
@@ -554,6 +690,7 @@ def build_dubbed_audio(
         "final_gain": final_gain,
         "no_normalize": no_normalize,
         "vocal_separation": vocal_separation,
+        "vocal_separation_method": vocal_separation_method,
         "ducking": ducking,
         "target_lufs": target_lufs,
         "lufs_applied": lufs_applied,
@@ -582,8 +719,16 @@ def main() -> int:
                         help="skip peak normalization "
                              "(use with --final-gain for manual control)")
     parser.add_argument("--vocal-separation", action="store_true",
-                        help="remove center-channel vocals "
-                             "from background audio (karaoke-style)")
+                        help="remove vocals from background audio "
+                             "(uses --vocal-separation-method)")
+    parser.add_argument("--vocal-separation-method",
+                        choices=["ffmpeg", "demucs"], default="ffmpeg",
+                        help="vocal removal technique: "
+                             "ffmpeg=center-channel pan (fast), "
+                             "demucs=AI source separation (better quality)")
+    parser.add_argument("--demucs-timeout", type=int, default=600,
+                        help="timeout for Demucs vocal separation "
+                             "in seconds (default 600)")
     parser.add_argument("--ducking", action="store_true",
                         help="lower background volume "
                              "where dubbed speech is present")
@@ -620,11 +765,13 @@ def main() -> int:
             final_gain=args.final_gain,
             no_normalize=args.no_normalize,
             vocal_separation=args.vocal_separation,
+            vocal_separation_method=args.vocal_separation_method,
             ducking=args.ducking,
             target_lufs=args.target_lufs,
             background_timeout=args.background_timeout,
             lufs_timeout=args.lufs_timeout,
             fail_if_background_mix_fails=args.fail_if_background_mix_fails,
+            demucs_timeout=args.demucs_timeout,
         )
         print("Build dubbed audio: PASS")
         print(f"Output: {output_audio}")
@@ -639,7 +786,7 @@ def main() -> int:
         if args.no_normalize:
             print("Normalize: off")
         if args.vocal_separation:
-            print("Vocal separation: on (center removal)")
+            print(f"Vocal separation: on ({args.vocal_separation_method})")
         if args.ducking:
             print("Ducking: on")
         if args.target_lufs is not None:

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -48,11 +49,15 @@ ROOT = Path(__file__).resolve().parents[1]
 PYVIDEOTRANS = ROOT / "pyvideotrans-main"
 OPENVOICE = ROOT / "OpenVoice-main"
 DEFAULT_REFERENCE = ROOT / "voices" / "openvoice_default_reference.wav"
+MALE_REFERENCE = ROOT / "voices" / "male_reference.wav"
+FEMALE_REFERENCE = ROOT / "voices" / "female_reference.wav"
 BUILD_AUDIO_SCRIPT = ROOT / "scripts" / "build_dubbed_audio_from_manifest.py"
 REMUX_SCRIPT = ROOT / "scripts" / "remux_dubbed_video.py"
+GENDER_DETECT_SCRIPT = ROOT / "scripts" / "detect_gender.py"
 PYVT_CONFIG = PYVIDEOTRANS / "videotrans" / "cfg.json"
 PRESERVE_KEY = "openvoice_preserve_dir"
 OPENVOICE_PROVIDER = "34"  # OpenVoice V2(Local)
+HUGGINGFACE_ASR_PROVIDER = "4"  # HuggingFace ASR for whisper-large-v3-turbo
 
 
 def die(msg: str, code: int = 1) -> int:
@@ -111,9 +116,10 @@ def latest_srt(start_time: float) -> Path | None:
     return latest_artifact(PYVIDEOTRANS / "tmp", start_time, "**/*.srt")
 
 
-def run_subprocess(cmd: list[str], cwd: Path, label: str) -> subprocess.CompletedProcess:
+def run_subprocess(cmd: list[str], cwd: Path, label: str,
+                   env: dict | None = None) -> subprocess.CompletedProcess:
     print(f"[{label}] running: {' '.join(cmd[:2])} ...")
-    result = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True)
+    result = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, env=env)
     if result.stdout:
         print(result.stdout)
     if result.stderr:
@@ -122,17 +128,43 @@ def run_subprocess(cmd: list[str], cwd: Path, label: str) -> subprocess.Complete
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Dub a personal video with pyVideoTrans + OpenVoice V2")
-    parser.add_argument("--input", required=True, help="absolute path to the input video (MP4)")
-    parser.add_argument("--source-language", default="en", help="source language code (e.g. en, auto)")
-    parser.add_argument("--target-language", default="en", help="target language code (e.g. en, es, zh-cn)")
-    parser.add_argument("--reference", default=DEFAULT_REFERENCE.as_posix(),
-                        help="reference voice WAV for OpenVoice cloning")
-    parser.add_argument("--output", required=True, help="absolute path for the final dubbed MP4")
-    parser.add_argument("--model", default="tiny", help="ASR model (tiny/base/small/medium/large-v3)")
+    parser = argparse.ArgumentParser(
+        description="Dub a personal video with pyVideoTrans + OpenVoice V2"
+    )
+    parser.add_argument("--input", required=True,
+                        help="absolute path to the input video (MP4)")
+    parser.add_argument("--source-language", default="auto",
+                        help="source language code (e.g. en, ko, auto)")
+    parser.add_argument("--target-language", default="en",
+                        help="target language code (e.g. en, es, zh-cn)")
+    parser.add_argument("--reference", default="",
+                        help="reference voice WAV for OpenVoice cloning "
+                             "(default: auto-detect gender)")
+    parser.add_argument("--output", required=True,
+                        help="absolute path for the final dubbed MP4")
+    parser.add_argument("--model", default="openai/whisper-large-v3-turbo",
+                        help="ASR model (tiny/base/small/medium/large-v3/"
+                             "openai/whisper-large-v3-turbo)")
+    parser.add_argument("--recogn-type", default="",
+                        help="ASR provider index "
+                             "(default: auto-select based on model)")
+    parser.add_argument("--gender", default="auto",
+                        help="voice gender: auto/male/female "
+                             "(default: auto-detect from audio)")
+    parser.add_argument("--vocal-separation-method",
+                        choices=["ffmpeg", "demucs"], default="demucs",
+                        help="vocal removal: ffmpeg=center-pan (fast), "
+                             "demucs=AI (better)")
+    parser.add_argument("--demucs-timeout", type=int, default=600,
+                        help="timeout for Demucs vocal separation in seconds")
+    parser.add_argument("--cpu-only", action="store_true",
+                        help="force CPU mode for ASR "
+                             "(useful when MPS runs out of memory)")
     parser.add_argument("--subtitle-type", default="1",
                         help="0=None 1=Hard 2=Soft 3=HardDual 4=SoftDual")
-    parser.add_argument("--job-dir", default="", help="working directory (default: tmp/personal_dub/<timestamp>)")
+    parser.add_argument("--job-dir", default="",
+                        help="working directory "
+                             "(default: tmp/personal_dub/<timestamp>)")
     parser.add_argument("--allow-partial", action="store_true",
                         help="allow the final remux even if some segments failed")
     parser.add_argument("--background-volume", type=float, default=0.0,
@@ -144,7 +176,7 @@ def main() -> int:
     parser.add_argument("--no-normalize", action="store_true",
                         help="skip peak normalization (use with --final-gain for manual control)")
     parser.add_argument("--vocal-separation", action="store_true",
-                        help="remove center-channel vocals from background audio")
+                        help="remove vocals from background audio (uses --vocal-separation-method)")
     parser.add_argument("--ducking", action="store_true",
                         help="lower background volume where dubbed speech is present")
     parser.add_argument("--target-lufs", type=float, default=None,
@@ -154,19 +186,17 @@ def main() -> int:
     parser.add_argument("--lufs-timeout", type=int, default=600,
                         help="ffmpeg timeout for LUFS normalization (seconds)")
     parser.add_argument("--fail-if-background-mix-fails", action="store_true",
-                        help="fail if background audio mixing fails instead of silent speech-only output")
+                        help="fail if background audio mixing fails "
+                             "instead of silent speech-only output")
     args = parser.parse_args()
 
     input_video = Path(args.input).expanduser().resolve()
     output_video = Path(args.output).expanduser().resolve()
-    reference = Path(args.reference).expanduser().resolve()
     py_python = PYVIDEOTRANS / ".venv" / "bin" / "python"
 
     # --- Validate inputs ---
     if not input_video.is_file():
         return die(f"input video missing: {input_video}")
-    if not reference.is_file():
-        return die(f"reference WAV missing: {reference}")
     if not py_python.is_file():
         return die(f"pyVideoTrans venv python missing: {py_python}")
     if not (OPENVOICE / ".venv" / "bin" / "python").is_file():
@@ -175,6 +205,62 @@ def main() -> int:
         return die("OpenVoice checkpoints missing. Run: make download-openvoice")
     if not BUILD_AUDIO_SCRIPT.is_file() or not REMUX_SCRIPT.is_file():
         return die("build/remux scripts missing from scripts/")
+
+    # --- Select reference voice (auto-detect gender if needed) ---
+    detected_gender = "unknown"
+    detected_f0 = 0.0
+    if args.reference:
+        # User explicitly specified a reference voice
+        reference = Path(args.reference).expanduser().resolve()
+        if not reference.is_file():
+            return die(f"reference WAV missing: {reference}")
+    elif args.gender == "male":
+        reference = MALE_REFERENCE
+        if not reference.is_file():
+            return die(
+                f"male reference voice missing: {reference}. "
+                "Run: python scripts/generate_reference_voices.py"
+            )
+        detected_gender = "male"
+    elif args.gender == "female":
+        reference = FEMALE_REFERENCE
+        if not reference.is_file():
+            return die(
+                f"female reference voice missing: {reference}. "
+                "Run: python scripts/generate_reference_voices.py"
+            )
+        detected_gender = "female"
+    else:
+        # Auto-detect gender from the original audio
+        reference = DEFAULT_REFERENCE
+        if GENDER_DETECT_SCRIPT.is_file():
+            print("Detecting speaker gender from audio...")
+            try:
+                # Run gender detection in the pyVideoTrans venv (has librosa)
+                gender_result = subprocess.run(
+                    [py_python.as_posix(), GENDER_DETECT_SCRIPT.as_posix(),
+                     "--input", input_video.as_posix(), "--json"],
+                    capture_output=True, text=True, timeout=120,
+                )
+                if gender_result.returncode == 0:
+                    import json as _json
+                    gender_data = _json.loads(gender_result.stdout.strip())
+                    detected_gender = gender_data.get("gender", "unknown")
+                    detected_f0 = gender_data.get("median_f0_hz", 0.0)
+                    print(f"  detected gender: {detected_gender} (F0: {detected_f0:.1f} Hz)")
+                    if detected_gender == "male" and MALE_REFERENCE.is_file():
+                        reference = MALE_REFERENCE
+                    elif detected_gender == "female" and FEMALE_REFERENCE.is_file():
+                        reference = FEMALE_REFERENCE
+            except Exception as e:
+                print(f"  gender detection failed: {e}, using default reference")
+        if not reference.is_file():
+            reference = DEFAULT_REFERENCE
+        if not reference.is_file():
+            return die(
+                f"reference WAV missing: {reference}. "
+                "Run: python scripts/generate_reference_voices.py"
+            )
 
     # --- Set up job dir ---
     stamp = str(int(time.time()))
@@ -199,6 +285,11 @@ def main() -> int:
     print(f"Input:    {input_video}")
     print(f"Output:   {output_video}")
     print(f"Reference: {reference}")
+    if detected_gender != "unknown":
+        print(f"Gender:   {detected_gender} (F0: {detected_f0:.1f} Hz)")
+    print(f"Model:    {args.model}")
+    print(f"Source:   {args.source_language}")
+    print(f"Target:   {args.target_language}")
     print(f"Job dir:  {job_dir}")
 
     # --- Configure OpenVoice settings in pyVideoTrans ---
@@ -219,13 +310,24 @@ def main() -> int:
         cfg[PRESERVE_KEY] = generated_audio.as_posix()
         write_json(PYVT_CONFIG, cfg)
 
+    # --- Determine ASR provider type ---
+    # HuggingFace ASR (recogn_type=4) for transformer-based models like
+    # whisper-large-v3-turbo; faster-whisper (recogn_type=0) for tiny/base/etc.
+    if args.recogn_type:
+        recogn_type = args.recogn_type
+    elif "/" in args.model or args.model.startswith("whisper-large"):
+        # HuggingFace model path (e.g. openai/whisper-large-v3-turbo)
+        recogn_type = HUGGINGFACE_ASR_PROVIDER
+    else:
+        recogn_type = "0"  # faster-whisper
+
     # --- Run pyVideoTrans VTV with OpenVoice provider ---
     started = time.time()
     cmd = [
         py_python.as_posix(), "cli.py",
         "--task", "vtv",
         "--name", input_video.as_posix(),
-        "--recogn_type", "0",
+        "--recogn_type", recogn_type,
         "--model_name", args.model,
         "--source_language_code", args.source_language,
         "--target_language_code", args.target_language,
@@ -236,8 +338,14 @@ def main() -> int:
         "--no-clear-cache",
         "--verbose",
     ]
+    # Build environment for subprocess
+    pyvt_env = dict(os.environ)
+    if args.cpu_only:
+        # Force CPU by disabling MPS
+        pyvt_env["PYTORCH_MPS_DISABLE"] = "1"
+        pyvt_env["CUDA_VISIBLE_DEVICES"] = ""
     try:
-        result = run_subprocess(cmd, PYVIDEOTRANS, "pyVideoTrans")
+        result = run_subprocess(cmd, PYVIDEOTRANS, "pyVideoTrans", env=pyvt_env)
     finally:
         # Restore the config so we don't leak preserve_dir into other runs.
         # Only restore if we actually modified it AND the file still exists.
@@ -248,7 +356,8 @@ def main() -> int:
                 current = read_json(PYVT_CONFIG)
             except Exception:
                 current = {}
-            current["openvoice_default_reference"] = cfg_previous.get("openvoice_default_reference", "")
+            current["openvoice_default_reference"] = \
+                cfg_previous.get("openvoice_default_reference", "")
             current[PRESERVE_KEY] = cfg_previous.get(PRESERVE_KEY, "")
             write_json(PYVT_CONFIG, current)
 
@@ -315,6 +424,9 @@ def main() -> int:
             build_cmd.append("--no-normalize")
         if args.vocal_separation:
             build_cmd.append("--vocal-separation")
+            build_cmd.extend(["--vocal-separation-method", args.vocal_separation_method])
+        if args.demucs_timeout != 600:
+            build_cmd.extend(["--demucs-timeout", str(args.demucs_timeout)])
         if args.ducking:
             build_cmd.append("--ducking")
         if args.target_lufs is not None:
@@ -363,10 +475,12 @@ def main() -> int:
             "final_gain": args.final_gain,
             "no_normalize": args.no_normalize,
             "vocal_separation": args.vocal_separation,
+            "vocal_separation_method": args.vocal_separation_method,
             "ducking": args.ducking,
             "target_lufs": args.target_lufs,
             "background_timeout": args.background_timeout,
             "lufs_timeout": args.lufs_timeout,
+            "demucs_timeout": args.demucs_timeout,
             "fail_if_background_mix_fails": args.fail_if_background_mix_fails,
         }
         _write_remux_command(
@@ -381,6 +495,11 @@ def main() -> int:
         report["final_video_job"] = final_video_job.as_posix()
         report["output_video"] = output_video.as_posix()
         report["build_audio_report"] = build_audio_report.as_posix()
+        report["detected_gender"] = detected_gender
+        report["detected_f0_hz"] = detected_f0
+        report["reference_voice"] = reference.as_posix()
+        report["asr_model"] = args.model
+        report["asr_recogn_type"] = recogn_type
         # Merge warnings from the build audio report if present
         if build_audio_report.is_file():
             try:

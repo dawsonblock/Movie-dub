@@ -10,19 +10,38 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 
 def local_ffmpeg() -> str:
-    bundled = Path(__file__).resolve().parents[1] / "pyvideotrans-main" / "ffmpeg" / "ffmpeg"
-    return bundled.as_posix() if bundled.is_file() else "ffmpeg"
+    """Find ffmpeg: prefer bundled, then PATH, then common Homebrew locations."""
+    candidates = [
+        Path(__file__).resolve().parents[1] / "pyvideotrans-main" / "ffmpeg" / "ffmpeg",
+        Path(shutil.which("ffmpeg") or ""),
+        Path("/opt/homebrew/bin/ffmpeg"),
+        Path("/usr/local/bin/ffmpeg"),
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.as_posix()
+    raise RuntimeError("ffmpeg not found")
 
 
 def local_ffprobe() -> str:
-    bundled = Path(__file__).resolve().parents[1] / "pyvideotrans-main" / "ffmpeg" / "ffprobe"
-    return bundled.as_posix() if bundled.is_file() else "ffprobe"
+    """Find ffprobe: prefer bundled, then PATH, then common Homebrew locations."""
+    candidates = [
+        Path(__file__).resolve().parents[1] / "pyvideotrans-main" / "ffmpeg" / "ffprobe",
+        Path(shutil.which("ffprobe") or ""),
+        Path("/opt/homebrew/bin/ffprobe"),
+        Path("/usr/local/bin/ffprobe"),
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.as_posix()
+    raise RuntimeError("ffprobe not found")
 
 
 def ffprobe_streams(path: Path) -> list[dict]:

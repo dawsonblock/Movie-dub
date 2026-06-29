@@ -90,6 +90,9 @@ def write_remux_command(
         "--output-audio",
         dubbed_audio.as_posix(),
     ]
+    # Include --report-json so regeneration also produces a build report
+    report_json_path = dubbed_audio.parent / "build_audio_report.json"
+    build_cmd.extend(["--report-json", report_json_path.as_posix()])
     if audio_options:
         if audio_options.get("background_volume", 0) > 0:
             build_cmd.extend(
@@ -107,6 +110,8 @@ def write_remux_command(
             build_cmd.append("--no-normalize")
         if audio_options.get("vocal_separation"):
             build_cmd.append("--vocal-separation")
+            method = audio_options.get("vocal_separation_method", "ffmpeg")
+            build_cmd.extend(["--vocal-separation-method", method])
         if audio_options.get("ducking"):
             build_cmd.append("--ducking")
         if audio_options.get("target_lufs") is not None:
@@ -121,6 +126,10 @@ def write_remux_command(
         if audio_options.get("lufs_timeout", 600) != 600:
             build_cmd.extend(
                 ["--lufs-timeout", str(audio_options["lufs_timeout"])]
+            )
+        if audio_options.get("demucs_timeout", 600) != 600:
+            build_cmd.extend(
+                ["--demucs-timeout", str(audio_options["demucs_timeout"])]
             )
         if audio_options.get("fail_if_background_mix_fails"):
             build_cmd.append("--fail-if-background-mix-fails")

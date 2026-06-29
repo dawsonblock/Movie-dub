@@ -1,4 +1,4 @@
-.PHONY: doctor setup-ffmpeg setup-pyvt setup-openvoice setup-checkpoints download-openvoice smoke-openvoice smoke-e2e test-openvoice test-pyvt dub proof
+.PHONY: doctor setup-ffmpeg setup-pyvt setup-openvoice setup-checkpoints download-openvoice smoke-openvoice smoke-e2e test-openvoice test-pyvt dub proof generate-voices
 
 doctor:
 	python3 scripts/doctor.py
@@ -43,30 +43,44 @@ test-openvoice:
 test-pyvt:
 	cd pyvideotrans-main && .venv/bin/python -m pytest
 
+generate-voices:
+	@echo "Generating male and female reference voices..."
+	@cd OpenVoice-main && .venv/bin/python ../scripts/generate_reference_voices.py
+
 # Personal dubbing wrapper. Usage:
 #   make dub INPUT=~/Movies/test.mp4 OUTPUT=~/Movies/dubbed-test.mp4
-# Optional: SOURCE=en TARGET=en REFERENCE=voices/openvoice_default_reference.wav
+# Optional: SOURCE=auto TARGET=en GENDER=auto MODEL=whisper-large-v3-turbo
 #           BACKGROUND_VOLUME=0.15 VOICE_VOLUME=1.2 VOCAL_SEPARATION=1
-#           DUCKING=1 TARGET_LUFS=-16 NO_NORMALIZE=1 FINAL_GAIN=1.0
+#           VOCAL_SEPARATION_METHOD=demucs DUCKING=1 TARGET_LUFS=-16
+#           NO_NORMALIZE=1 FINAL_GAIN=1.0
 #           BACKGROUND_TIMEOUT=900 LUFS_TIMEOUT=1200 FAIL_IF_BACKGROUND_MIX_FAILS=1
+#           DEMUCS_TIMEOUT=900
 dub:
 	@if [ -z "$(INPUT)" ] || [ -z "$(OUTPUT)" ]; then \
 		echo "Usage: make dub INPUT=<input.mp4> OUTPUT=<output.mp4>"; \
+		echo "  SOURCE=auto TARGET=en GENDER=auto MODEL=whisper-large-v3-turbo"; \
+		echo "  BACKGROUND_VOLUME=0.15 VOCAL_SEPARATION=1 VOCAL_SEPARATION_METHOD=demucs"; \
+		echo "  DUCKING=1"; \
 		exit 1; \
 	fi
 	python3 scripts/run_personal_dub.py \
 		--input "$(INPUT)" \
-		--source-language $(or $(SOURCE),en) \
+		--source-language $(or $(SOURCE),auto) \
 		--target-language $(or $(TARGET),en) \
-		--reference $(or $(REFERENCE),voices/openvoice_default_reference.wav) \
+		--model $(or $(MODEL),openai/whisper-large-v3-turbo) \
+		$(if $(GENDER),--gender $(GENDER)) \
+		$(if $(REFERENCE),--reference $(REFERENCE)) \
 		--output "$(OUTPUT)" \
 		$(if $(BACKGROUND_VOLUME),--background-volume $(BACKGROUND_VOLUME)) \
 		$(if $(VOICE_VOLUME),--voice-volume $(VOICE_VOLUME)) \
 		$(if $(FINAL_GAIN),--final-gain $(FINAL_GAIN)) \
 		$(if $(NO_NORMALIZE),--no-normalize) \
 		$(if $(VOCAL_SEPARATION),--vocal-separation) \
+		$(if $(VOCAL_SEPARATION_METHOD),--vocal-separation-method $(VOCAL_SEPARATION_METHOD)) \
 		$(if $(DUCKING),--ducking) \
 		$(if $(TARGET_LUFS),--target-lufs $(TARGET_LUFS)) \
 		$(if $(BACKGROUND_TIMEOUT),--background-timeout $(BACKGROUND_TIMEOUT)) \
 		$(if $(LUFS_TIMEOUT),--lufs-timeout $(LUFS_TIMEOUT)) \
+		$(if $(DEMUCS_TIMEOUT),--demucs-timeout $(DEMUCS_TIMEOUT)) \
+		$(if $(CPU_ONLY),--cpu-only) \
 		$(if $(FAIL_IF_BACKGROUND_MIX_FAILS),--fail-if-background-mix-fails)

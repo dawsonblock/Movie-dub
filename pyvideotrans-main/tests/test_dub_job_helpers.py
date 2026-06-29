@@ -250,10 +250,12 @@ def test_write_remux_command_preserves_audio_options(tmp_path):
         "final_gain": 0.9,
         "no_normalize": False,
         "vocal_separation": True,
+        "vocal_separation_method": "demucs",
         "ducking": True,
         "target_lufs": -16.0,
         "background_timeout": 600,
         "lufs_timeout": 900,
+        "demucs_timeout": 900,
         "fail_if_background_mix_fails": True,
     }
 
@@ -274,6 +276,8 @@ def test_write_remux_command_preserves_audio_options(tmp_path):
     assert "--final-gain" in build_str
     assert "0.9" in build_str
     assert "--vocal-separation" in build_str
+    assert "--vocal-separation-method" in build_str
+    assert "demucs" in build_str
     assert "--ducking" in build_str
     assert "--target-lufs" in build_str
     assert "-16.0" in build_str or "-16" in build_str
@@ -281,11 +285,14 @@ def test_write_remux_command_preserves_audio_options(tmp_path):
     assert "600" in build_str
     assert "--lufs-timeout" in build_str
     assert "900" in build_str
+    assert "--demucs-timeout" in build_str
     assert "--fail-if-background-mix-fails" in build_str
 
     # audio_options should be stored in the remux command
     assert cmd["audio_options"]["background_volume"] == 0.15
     assert cmd["audio_options"]["ducking"] is True
+    assert cmd["audio_options"]["vocal_separation_method"] == "demucs"
+    assert cmd["audio_options"]["demucs_timeout"] == 900
 
 
 def test_write_remux_command_without_audio_options(tmp_path):
@@ -308,3 +315,25 @@ def test_write_remux_command_without_audio_options(tmp_path):
     build_str = " ".join(str(p) for p in cmd["build_audio_command"])
     assert "--background-volume" not in build_str
     assert "--ducking" not in build_str
+
+
+def test_write_remux_command_includes_report_json(tmp_path):
+    """build_audio_command must include --report-json so regeneration
+    also produces a build_audio_report.json for diagnostics."""
+    job_dir = tmp_path / "job"
+    remux_path = job_dir / "remux_command.json"
+    input_video = TEST_VIDEO
+    dubbed_audio = job_dir / "dubbed_audio.wav"
+    output_video = job_dir / "final_dubbed.mp4"
+    manifest_path = job_dir / "openvoice_manifest.json"
+
+    dub_job_helpers.write_remux_command(
+        remux_path, input_video, dubbed_audio, output_video, manifest_path
+    )
+
+    cmd = json.loads(remux_path.read_text(encoding="utf-8"))
+    build_cmd = cmd["build_audio_command"]
+    build_str = " ".join(str(p) for p in build_cmd)
+    assert "--report-json" in build_str
+    # The report path should be alongside the dubbed audio
+    assert "build_audio_report.json" in build_str

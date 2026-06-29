@@ -512,3 +512,51 @@ def test_report_includes_warnings_list(tmp_path):
     assert isinstance(report["warnings"], list)
     # No warnings for a simple build with no background/LUFS
     assert len(report["warnings"]) == 0
+
+
+def test_build_report_includes_vocal_separation_method(tmp_path):
+    """build report should include vocal_separation_method field."""
+    gen = tmp_path / "generated_audio"
+    gen.mkdir(parents=True)
+    _write_tone_wav(gen / "000001.wav", 1.0)
+    manifest = {
+        "ok": 1, "error": 0, "skipped": 0,
+        "segments": [
+            {"id": 1, "status": "ok", "start": 0.0, "end": 1.0,
+             "output_audio": (gen / "000001.wav").as_posix()},
+        ],
+    }
+    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    output_audio = tmp_path / "dubbed_audio.wav"
+
+    report = build_dubbed_audio_from_manifest.build_dubbed_audio(
+        manifest_path, TEST_VIDEO, output_audio,
+        vocal_separation=False,
+        vocal_separation_method="demucs",
+    )
+    assert report["vocal_separation_method"] == "demucs"
+    assert report["vocal_separation"] is False
+
+
+def test_build_accepts_demucs_timeout_param(tmp_path):
+    """build_dubbed_audio should accept demucs_timeout without error."""
+    gen = tmp_path / "generated_audio"
+    gen.mkdir(parents=True)
+    _write_tone_wav(gen / "000001.wav", 1.0)
+    manifest = {
+        "ok": 1, "error": 0, "skipped": 0,
+        "segments": [
+            {"id": 1, "status": "ok", "start": 0.0, "end": 1.0,
+             "output_audio": (gen / "000001.wav").as_posix()},
+        ],
+    }
+    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    output_audio = tmp_path / "dubbed_audio.wav"
+
+    report = build_dubbed_audio_from_manifest.build_dubbed_audio(
+        manifest_path, TEST_VIDEO, output_audio,
+        demucs_timeout=900,
+    )
+    assert report["status"] == "ok"

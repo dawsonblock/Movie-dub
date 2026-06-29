@@ -2,6 +2,17 @@ MIT License
 
 Copyright (c) 2026 dawsonblock
 
+This license applies only to original wrapper/orchestration code in this
+repository (scripts/, bridge/, Makefile). Bundled third-party projects
+retain their own licenses. See LICENSES.md and UPSTREAMS.md for details.
+
+pyVideoTrans (pyvideotrans-main/) is licensed under GPLv3.
+OpenVoice (OpenVoice-main/) is licensed under Apache 2.0.
+
+Redistribution of the full bundle is subject to all included upstream
+licenses. Because pyVideoTrans is GPLv3, the combined work must be
+distributed under GPLv3 terms.
+
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights

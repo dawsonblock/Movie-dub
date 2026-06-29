@@ -338,7 +338,7 @@ def _mix_background_audio(
     speech_regions: list[tuple[int, int]] | None = None,
     timeout: int = 300,
     demucs_timeout: int = 600,
-) -> bool:
+) -> dict:
     """Extract original audio from the input video and mix it under the speech canvas.
 
     If vocal_separation is True, removes vocals from the background before mixing.
@@ -347,10 +347,26 @@ def _mix_background_audio(
       - "demucs": AI-based source separation (slower, much better quality)
     If ducking is True, lowers the background volume where speech is present
     using a smooth envelope derived from speech_regions.
-    Returns True if mixing succeeded.
+
+    Returns a dict with:
+      - ``background_mix_applied``: bool
+      - ``demucs_requested``: bool
+      - ``demucs_used``: bool
+      - ``demucs_error``: str (empty if no error)
+      - ``ffmpeg_fallback_used``: bool
+      - ``warnings``: list of warning dicts
     """
     import subprocess
     import tempfile
+
+    result = {
+        "background_mix_applied": False,
+        "demucs_requested": vocal_separation and vocal_separation_method == "demucs",
+        "demucs_used": False,
+        "demucs_error": "",
+        "ffmpeg_fallback_used": False,
+        "warnings": [],
+    }
 
     bg_path: Path | None = None
     demucs_dir: Path | None = None
@@ -358,40 +374,50 @@ def _mix_background_audio(
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             bg_path = Path(tmp.name)
 
-        if vocal_separation and vocal_separation_method == "demucs":
-            # Use Demucs AI-based vocal separation
+        # --- Demucs path with controlled exception boundary (Blocker 2) ---
+        if result["demucs_requested"]:
             demucs_dir = Path(tempfile.mkdtemp(prefix="demucs_"))
-            no_vocals = _demucs_vocal_separation(
-                input_video, demucs_dir, timeout=demucs_timeout
-            )
-            if no_vocals and no_vocals.is_file():
-                # Convert no_vocals to the target sample rate and mono
-                cmd = [
-                    local_ffmpeg(), "-hide_banner", "-nostdin", "-y",
-                    "-i", no_vocals.as_posix(),
-                    "-ac", "1",
-                    "-ar", str(sample_rate),
-                    "-f", "wav",
-                    bg_path.as_posix(),
-                ]
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-                if result.returncode != 0 or not bg_path.is_file():
-                    # Fall back to ffmpeg pan filter
+            try:
+                no_vocals = _demucs_vocal_separation(
+                    input_video, demucs_dir, timeout=demucs_timeout
+                )
+                if no_vocals and no_vocals.is_file():
+                    # Convert no_vocals to the target sample rate and mono
                     cmd = [
                         local_ffmpeg(), "-hide_banner", "-nostdin", "-y",
-                        "-i", input_video.as_posix(),
-                        "-vn",
-                        "-af", "pan=stereo|c0=c0-c1|c1=c1-c0",
+                        "-i", no_vocals.as_posix(),
                         "-ac", "1",
                         "-ar", str(sample_rate),
                         "-f", "wav",
                         bg_path.as_posix(),
                     ]
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-                    if result.returncode != 0 or not bg_path.is_file():
-                        return False
-            else:
-                # Demucs failed, fall back to ffmpeg pan filter
+                    conv = subprocess.run(
+                        cmd, capture_output=True, text=True, timeout=timeout
+                    )
+                    if conv.returncode == 0 and bg_path.is_file():
+                        result["demucs_used"] = True
+                if not result["demucs_used"]:
+                    raise RuntimeError("Demucs produced no usable output")
+            except Exception as exc:
+                # Demucs failed (import error, inference crash, etc.).
+                # Warn and fall back to ffmpeg. Never kill the job unless
+                # the user explicitly requests fail-hard behavior.
+                result["demucs_error"] = str(exc)
+                result["warnings"].append({
+                    "stage": "demucs",
+                    "message": str(exc),
+                    "fallback": "ffmpeg",
+                })
+                print(
+                    f"WARNING: Demucs failed, falling back to ffmpeg: {exc}",
+                    file=sys.stderr,
+                )
+
+        # --- ffmpeg fallback (always attempted if Demucs didn't produce output) ---
+        if not result["demucs_used"]:
+            result["ffmpeg_fallback_used"] = True
+            if vocal_separation:
+                # Remove center-channel vocals using FFmpeg's pan filter.
                 cmd = [
                     local_ffmpeg(), "-hide_banner", "-nostdin", "-y",
                     "-i", input_video.as_posix(),
@@ -402,39 +428,21 @@ def _mix_background_audio(
                     "-f", "wav",
                     bg_path.as_posix(),
                 ]
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-                if result.returncode != 0 or not bg_path.is_file():
-                    return False
-        elif vocal_separation:
-            # Remove center-channel vocals using FFmpeg's pan filter.
-            # L-R and R-L cancel out centered (mono) vocals, leaving
-            # mostly instrumental content. Downmix to mono afterward.
-            cmd = [
-                local_ffmpeg(), "-hide_banner", "-nostdin", "-y",
-                "-i", input_video.as_posix(),
-                "-vn",
-                "-af", "pan=stereo|c0=c0-c1|c1=c1-c0",
-                "-ac", "1",
-                "-ar", str(sample_rate),
-                "-f", "wav",
-                bg_path.as_posix(),
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-            if result.returncode != 0 or not bg_path.is_file():
-                return False
-        else:
-            cmd = [
-                local_ffmpeg(), "-hide_banner", "-nostdin", "-y",
-                "-i", input_video.as_posix(),
-                "-vn",
-                "-ac", "1",
-                "-ar", str(sample_rate),
-                "-f", "wav",
-                bg_path.as_posix(),
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-            if result.returncode != 0 or not bg_path.is_file():
-                return False
+            else:
+                cmd = [
+                    local_ffmpeg(), "-hide_banner", "-nostdin", "-y",
+                    "-i", input_video.as_posix(),
+                    "-vn",
+                    "-ac", "1",
+                    "-ar", str(sample_rate),
+                    "-f", "wav",
+                    bg_path.as_posix(),
+                ]
+            ff_result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout
+            )
+            if ff_result.returncode != 0 or not bg_path.is_file():
+                return result  # background_mix_applied stays False
 
         bg_samples, _ = load_audio_samples(bg_path, sample_rate)
 
@@ -476,9 +484,15 @@ def _mix_background_audio(
             n = min(len(bg_samples), total_samples)
             for i in range(n):
                 canvas[i] += float(bg_samples[i]) * volume
-        return True
-    except Exception:
-        return False
+        result["background_mix_applied"] = True
+        return result
+    except Exception as exc:
+        result["warnings"].append({
+            "stage": "background_mix",
+            "message": str(exc),
+            "fallback": "none",
+        })
+        return result
     finally:
         if bg_path is not None:
             bg_path.unlink(missing_ok=True)
@@ -487,12 +501,15 @@ def _mix_background_audio(
 
 
 def _apply_lufs_normalization(
-    input_wav: Path, target_lufs: float = -16.0, timeout: int = 600
+    input_wav: Path, target_lufs: float = -16.0, timeout: int = 600,
+    sample_rate: int = DEFAULT_SAMPLE_RATE,
 ) -> bool:
     """Apply EBU R128 LUFS normalization via FFmpeg loudnorm filter.
 
     Normalizes input_wav in-place. Returns True if normalization succeeded.
     target_lufs: -16.0 is typical for web/streaming, -23.0 for EBU broadcast.
+    sample_rate: the output sample rate (Blocker 6 — must preserve the
+    selected sample rate, not default to 44100).
     """
     import subprocess
     import tempfile
@@ -507,7 +524,7 @@ def _apply_lufs_normalization(
             local_ffmpeg(), "-hide_banner", "-nostdin", "-y",
             "-i", input_wav.as_posix(),
             "-af", f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11",
-            "-ar", str(DEFAULT_SAMPLE_RATE),
+            "-ar", str(sample_rate),
             "-f", "wav",
             tmp_path.as_posix(),
         ]
@@ -622,8 +639,17 @@ def build_dubbed_audio(
     # the speech.
     background_mix = False
     background_warning = ""
+    bg_report = {
+        "background_mix_requested": background_volume > 0,
+        "demucs_requested": vocal_separation and vocal_separation_method == "demucs",
+        "demucs_used": False,
+        "demucs_error": "",
+        "ffmpeg_fallback_used": False,
+        "background_mix_applied": False,
+        "warnings": [],
+    }
     if background_volume > 0:
-        background_mix = _mix_background_audio(
+        bg_result = _mix_background_audio(
             canvas, input_video, sample_rate, total_samples,
             background_volume,
             vocal_separation=vocal_separation,
@@ -633,6 +659,8 @@ def build_dubbed_audio(
             timeout=background_timeout,
             demucs_timeout=demucs_timeout,
         )
+        bg_report.update(bg_result)
+        background_mix = bg_result["background_mix_applied"]
         if not background_mix:
             background_warning = (
                 "background audio mix failed (ffmpeg timeout or error); "
@@ -663,7 +691,8 @@ def build_dubbed_audio(
     lufs_warning = ""
     if target_lufs is not None:
         lufs_applied = _apply_lufs_normalization(
-            output_audio, target_lufs, timeout=lufs_timeout
+            output_audio, target_lufs, timeout=lufs_timeout,
+            sample_rate=sample_rate,
         )
         if not lufs_applied:
             lufs_warning = (
@@ -686,6 +715,12 @@ def build_dubbed_audio(
         "errors": errors,
         "background_volume": background_volume,
         "background_mix": background_mix,
+        "background_mix_requested": bg_report["background_mix_requested"],
+        "demucs_requested": bg_report["demucs_requested"],
+        "demucs_used": bg_report["demucs_used"],
+        "demucs_error": bg_report["demucs_error"],
+        "ffmpeg_fallback_used": bg_report["ffmpeg_fallback_used"],
+        "background_mix_applied": bg_report["background_mix_applied"],
         "voice_volume": voice_volume,
         "final_gain": final_gain,
         "no_normalize": no_normalize,
@@ -694,7 +729,8 @@ def build_dubbed_audio(
         "ducking": ducking,
         "target_lufs": target_lufs,
         "lufs_applied": lufs_applied,
-        "warnings": [w for w in [background_warning, lufs_warning] if w],
+        "warnings": [w for w in [background_warning, lufs_warning] if w]
+                     + bg_report["warnings"],
     }
 
 

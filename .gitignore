@@ -15,6 +15,9 @@
 /pyvideotrans-openvoice-provider-test.wav-openvoice.wav
 /assets/test_clip.aiff
 
+# Generated proof reports
+/reports/
+
 # Local runtime data and model assets. Recreate these from the setup steps.
 /pyvideotrans-main/models/
 /pyvideotrans-main/tmp/

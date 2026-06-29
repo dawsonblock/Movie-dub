@@ -17,6 +17,7 @@ from dub_job_helpers import (
     write_remux_command as _write_remux_command,
     write_review_file as _write_review_file,
 )
+from job_state import create_job_dir
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -173,7 +174,11 @@ def main() -> int:
         return 1
 
     if JOB_DIR.exists():
-        shutil.rmtree(JOB_DIR)
+        # Safe deletion: JOB_DIR is under tmp/e2e_short_clip, not personal_dub,
+        # so we use allow_external=True since this is a controlled smoke test dir.
+        create_job_dir(JOB_DIR, force=True, allow_external=True)
+    else:
+        create_job_dir(JOB_DIR, force=False, allow_external=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     started = time.time()

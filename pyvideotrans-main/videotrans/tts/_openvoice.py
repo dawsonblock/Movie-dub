@@ -86,6 +86,12 @@ class OpenVoiceTTS(BaseTTS):
         self.allow_partial = bool(settings.get("openvoice_allow_partial", False))
         self.bridge_script = _setting_path("openvoice_bridge_script", workspace / "bridge" / "openvoice_segment_tts.py")
         self.preserve_dir = str(settings.get("openvoice_preserve_dir", "") or "").strip()
+        # Job-scoped explicit paths (Blocker 5): if set, the provider writes
+        # queue/manifest/logs to these exact paths instead of global temp dirs.
+        self.explicit_queue_file = str(settings.get("openvoice_queue_file", "") or "").strip()
+        self.explicit_manifest_file = str(settings.get("openvoice_manifest_file", "") or "").strip()
+        self.explicit_logs_file = str(settings.get("openvoice_logs_file", "") or "").strip()
+        self.explicit_work_dir = str(settings.get("openvoice_work_dir", "") or "").strip()
 
     def _validate_paths(self):
         missing = []
@@ -119,10 +125,24 @@ class OpenVoiceTTS(BaseTTS):
 
     def _exec(self):
         self._validate_paths()
-        queue_tts_file = f"{config.TEMP_DIR}/{self.uuid}/openvoice-queue-{time.time()}.json"
-        manifest_file = f"{config.TEMP_DIR}/{self.uuid}/openvoice-manifest-{time.time()}.json"
-        logs_file = f"{config.TEMP_DIR}/{self.uuid}/openvoice-{time.time()}.log"
-        work_dir = f"{config.TEMP_DIR}/{self.uuid}/openvoice-work"
+        # Use explicit job-scoped paths when configured (Blocker 5), otherwise
+        # fall back to the legacy global temp dir paths.
+        if self.explicit_queue_file:
+            queue_tts_file = self.explicit_queue_file
+        else:
+            queue_tts_file = f"{config.TEMP_DIR}/{self.uuid}/openvoice-queue-{time.time()}.json"
+        if self.explicit_manifest_file:
+            manifest_file = self.explicit_manifest_file
+        else:
+            manifest_file = f"{config.TEMP_DIR}/{self.uuid}/openvoice-manifest-{time.time()}.json"
+        if self.explicit_logs_file:
+            logs_file = self.explicit_logs_file
+        else:
+            logs_file = f"{config.TEMP_DIR}/{self.uuid}/openvoice-{time.time()}.log"
+        if self.explicit_work_dir:
+            work_dir = self.explicit_work_dir
+        else:
+            work_dir = f"{config.TEMP_DIR}/{self.uuid}/openvoice-work"
 
         bridge_queue = self._prepare_queue()
         Path(queue_tts_file).write_text(json.dumps(bridge_queue, ensure_ascii=False), encoding="utf-8")

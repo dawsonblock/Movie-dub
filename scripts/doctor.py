@@ -65,14 +65,14 @@ def dir_check(section: str, name: str, path: Path,
 
 
 def import_check(section: str, python: Path, module: str,
-                 cwd: Path | None = None) -> Check:
+                 cwd: Path | None = None, required: bool = True) -> Check:
     if not python.is_file():
         return check(section, f"import {module}", False,
-                     f"missing python: {python}")
+                     f"missing python: {python}", required=required)
     ok, detail = run(
         [python.as_posix(), "-c", f"import {module}; print('ok')"], cwd=cwd
     )
-    return check(section, f"import {module}", ok, detail)
+    return check(section, f"import {module}", ok, detail, required=required)
 
 
 def python_version_check(section: str, python: Path, name: str) -> Check:
@@ -215,13 +215,19 @@ def checkpoints_ready(checkpoint_path: Path) -> bool:
     )
 
 
-def collect_checks() -> list[Check]:
+def collect_checks(
+    need_openvoice: bool = True,
+    need_demucs: bool = False,
+    need_vocal_separation: bool = False,
+    strict: bool = False,
+) -> list[Check]:
     py_python = PYVIDEOTRANS / ".venv" / "bin" / "python"
     ov_python = OPENVOICE / ".venv" / "bin" / "python"
     ov_checkpoint_dir = checkpoint_dir()
     checkpoint_tools_required = not checkpoints_ready(ov_checkpoint_dir)
 
-    return [
+    # --- Required group (default install must pass) ---
+    checks: list[Check] = [
         check("System", "macOS", sys.platform == "darwin", sys.platform),
         python310_binary_check(),
         binary_check("System", "ffmpeg", "ffmpeg", PYVIDEOTRANS / "ffmpeg" / "ffmpeg"),
@@ -233,15 +239,24 @@ def collect_checks() -> list[Check]:
         import_check("pyVideoTrans", py_python, "PySide6", cwd=PYVIDEOTRANS),
         import_check("pyVideoTrans", py_python, "videotrans", cwd=PYVIDEOTRANS),
         file_check("pyVideoTrans", "cli.py", PYVIDEOTRANS / "cli.py"),
-        dir_check("OpenVoice", "repo", OPENVOICE),
-        dir_check("OpenVoice", "venv", OPENVOICE / ".venv"),
-        file_check("OpenVoice", "python", ov_python),
-        python_version_check("OpenVoice", ov_python, "Python 3.10"),
-        import_check("OpenVoice", ov_python, "torch", cwd=OPENVOICE),
-        import_check("OpenVoice", ov_python, "openvoice", cwd=OPENVOICE),
-        import_check("OpenVoice", ov_python, "melo", cwd=OPENVOICE),
-        import_check("OpenVoice", ov_python, "soundfile", cwd=OPENVOICE),
-        import_check("OpenVoice", ov_python, "unidic", cwd=OPENVOICE),
+    ]
+
+    # --- OpenVoice group (required by default, can be skipped with --no-openvoice) ---
+    if need_openvoice:
+        checks.extend([
+            dir_check("OpenVoice", "repo", OPENVOICE),
+            dir_check("OpenVoice", "venv", OPENVOICE / ".venv"),
+            file_check("OpenVoice", "python", ov_python),
+            python_version_check("OpenVoice", ov_python, "Python 3.10"),
+            import_check("OpenVoice", ov_python, "torch", cwd=OPENVOICE),
+            import_check("OpenVoice", ov_python, "openvoice", cwd=OPENVOICE),
+            import_check("OpenVoice", ov_python, "melo", cwd=OPENVOICE),
+            import_check("OpenVoice", ov_python, "soundfile", cwd=OPENVOICE),
+            import_check("OpenVoice", ov_python, "unidic", cwd=OPENVOICE),
+        ])
+
+    # --- Checkpoint download tools (required only if checkpoints missing) ---
+    checks.extend([
         uvx_check(),
         hf_cli_check(required=checkpoint_tools_required and not shutil.which("uvx")),
         git_xet_check(required=False),
@@ -259,10 +274,19 @@ def collect_checks() -> list[Check]:
             os.environ.get("OPENVOICE_HF_REPO", DEFAULT_HF_REPO),
             required=checkpoint_tools_required,
         ),
-        file_check("Models", "converter config", ov_checkpoint_dir / "converter" / "config.json"),
-        file_check("Models", "converter checkpoint", ov_checkpoint_dir / "converter" / "checkpoint.pth"),
-        converter_checkpoint_real_file_check(ov_checkpoint_dir / "converter" / "checkpoint.pth"),
-        base_speaker_check(ov_checkpoint_dir),
+    ])
+
+    # --- OpenVoice checkpoints (required by default) ---
+    if need_openvoice:
+        checks.extend([
+            file_check("Models", "converter config", ov_checkpoint_dir / "converter" / "config.json"),
+            file_check("Models", "converter checkpoint", ov_checkpoint_dir / "converter" / "checkpoint.pth"),
+            converter_checkpoint_real_file_check(ov_checkpoint_dir / "converter" / "checkpoint.pth"),
+            base_speaker_check(ov_checkpoint_dir),
+        ])
+
+    # --- Bridge + assets ---
+    checks.extend([
         file_check("Bridge", "bridge script", ROOT / "bridge" / "openvoice_segment_tts.py"),
         bridge_compile_check(),
         file_check("Bridge", "OpenVoice smoke script", ROOT / "scripts" / "smoke_openvoice_bridge.py"),
@@ -271,13 +295,25 @@ def collect_checks() -> list[Check]:
         # Optional: male/female reference voices for gender-based dubbing
         file_check("Assets", "male reference WAV", ROOT / "voices" / "male_reference.wav", required=False),
         file_check("Assets", "female reference WAV", ROOT / "voices" / "female_reference.wav", required=False),
-        # Optional: Demucs for AI-based vocal separation
-        import_check("Audio", py_python, "demucs", cwd=PYVIDEOTRANS),
-        # Optional: librosa for gender detection
-        import_check("Audio", py_python, "librosa", cwd=PYVIDEOTRANS),
-        # Optional: transformers for whisper-large-v3-turbo
-        import_check("Audio", py_python, "transformers", cwd=PYVIDEOTRANS),
-    ]
+    ])
+
+    # --- Optional audio-quality dependencies (Blocker 1) ---
+    # Demucs is only required when --need-demucs or --need-vocal-separation is passed.
+    # librosa is used for gender detection (optional).
+    # transformers is used for whisper-large-v3-turbo (optional).
+    demucs_required = need_demucs or need_vocal_separation or strict
+    checks.append(
+        import_check("Audio", py_python, "demucs", cwd=PYVIDEOTRANS,
+                      required=demucs_required)
+    )
+    checks.append(
+        import_check("Audio", py_python, "librosa", cwd=PYVIDEOTRANS, required=False)
+    )
+    checks.append(
+        import_check("Audio", py_python, "transformers", cwd=PYVIDEOTRANS, required=False)
+    )
+
+    return checks
 
 
 def summarize(checks: list[Check], strict: bool = False) -> dict:
@@ -326,10 +362,32 @@ def print_table(checks: list[Check]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check local pyVideoTrans + OpenVoice readiness")
-    parser.add_argument("--strict", action="store_true", help="return nonzero for optional warnings too")
-    parser.add_argument("--json", action="store_true", help="print machine-readable readiness JSON")
+    parser.add_argument("--strict", action="store_true",
+                        help="return nonzero for optional warnings too")
+    parser.add_argument("--json", action="store_true",
+                        help="print machine-readable readiness JSON")
+    parser.add_argument("--need-openvoice", action="store_true", default=True,
+                        help="require OpenVoice venv + checkpoints (default: on)")
+    parser.add_argument("--no-openvoice", dest="need_openvoice",
+                        action="store_false",
+                        help="skip OpenVoice checks (pyVideoTrans-only setup)")
+    parser.add_argument("--need-demucs", action="store_true",
+                        help="require Demucs for AI-based vocal separation")
+    parser.add_argument("--need-vocal-separation", action="store_true",
+                        help="require Demucs + vocal-separation dependencies")
+    parser.add_argument("--checkpoints-only", action="store_true",
+                        help="only check OpenVoice checkpoints (Blocker 9)")
     args = parser.parse_args()
-    checks = collect_checks()
+
+    if args.checkpoints_only:
+        return _checkpoints_only_main()
+
+    checks = collect_checks(
+        need_openvoice=args.need_openvoice,
+        need_demucs=args.need_demucs,
+        need_vocal_separation=args.need_vocal_separation,
+        strict=args.strict,
+    )
     summary = summarize(checks, strict=args.strict)
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
@@ -343,6 +401,74 @@ def main() -> int:
     print(f"Required failures: {summary['required_failures']}")
     print(f"Optional warnings: {summary['optional_warnings']}")
     return 0 if summary["ready"] else 1
+
+
+def _checkpoint_report(checkpoint_path: Path) -> dict:
+    """Build a detailed checkpoint report (Blocker 9)."""
+    converter_dir = checkpoint_path / "converter"
+    speaker_dir = checkpoint_path / "base_speakers" / "ses"
+    checked: list[str] = []
+    missing: list[str] = []
+    too_small: list[str] = []
+    pointer_files: list[str] = []
+
+    config_path = converter_dir / "config.json"
+    ckpt_path = converter_dir / "checkpoint.pth"
+    checked.append(config_path.as_posix())
+    if not config_path.is_file():
+        missing.append(config_path.as_posix())
+    checked.append(ckpt_path.as_posix())
+    if not ckpt_path.is_file():
+        missing.append(ckpt_path.as_posix())
+    else:
+        size = ckpt_path.stat().st_size
+        prefix = ckpt_path.read_bytes()[:200]
+        if prefix.startswith(LFS_POINTER_PREFIX) or LFS_POINTER_PREFIX in prefix:
+            pointer_files.append(f"{ckpt_path.as_posix()} (LFS pointer stub)")
+        elif size < MIN_CONVERTER_CHECKPOINT_BYTES:
+            too_small.append(f"{ckpt_path.as_posix()} ({size} bytes)")
+
+    speakers = sorted(speaker_dir.glob("*.pth")) if speaker_dir.is_dir() else []
+    for sp in speakers:
+        checked.append(sp.as_posix())
+        size = sp.stat().st_size
+        prefix = sp.read_bytes()[:200]
+        if prefix.startswith(LFS_POINTER_PREFIX) or LFS_POINTER_PREFIX in prefix:
+            pointer_files.append(f"{sp.as_posix()} (LFS pointer stub)")
+        elif size < 1000:
+            too_small.append(f"{sp.as_posix()} ({size} bytes)")
+    if not speakers:
+        missing.append(speaker_dir.as_posix())
+
+    status = "pass" if not (missing or too_small or pointer_files) else "fail"
+    return {
+        "openvoice_checkpoints": {
+            "status": status,
+            "missing": missing,
+            "too_small": too_small,
+            "pointer_files": pointer_files,
+            "checked_files": checked,
+        }
+    }
+
+
+def _checkpoints_only_main() -> int:
+    """Run only OpenVoice checkpoint validation (Blocker 9)."""
+    ckpt_dir = checkpoint_dir()
+    report = _checkpoint_report(ckpt_dir)
+    cv = report["openvoice_checkpoints"]
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if cv["status"] == "pass":
+        print("PASS: all OpenVoice checkpoints are present and non-pointer files")
+        return 0
+    print("FAIL:")
+    for item in cv["missing"]:
+        print(f"  - missing: {item}")
+    for item in cv["pointer_files"]:
+        print(f"  - pointer file: {item}")
+    for item in cv["too_small"]:
+        print(f"  - too small: {item}")
+    return 1
 
 
 if __name__ == "__main__":

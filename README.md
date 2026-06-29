@@ -9,6 +9,20 @@ Personal Mac dubbing workflow using pyVideoTrans for video orchestration and Ope
 - Production-ready: no
 - Commercial distribution: license review required because pyVideoTrans is GPLv3
 
+## Licensing
+
+This repository bundles multiple upstream projects with different licenses:
+
+- **Wrapper scripts** (`scripts/`, `bridge/`, `Makefile`): MIT
+- **pyVideoTrans** (`pyvideotrans-main/`): GPLv3
+- **OpenVoice** (`OpenVoice-main/`): Apache 2.0
+
+The root `LICENSE` file applies only to the original wrapper/orchestration
+code. Because pyVideoTrans is GPLv3, redistribution of the full bundle must
+comply with GPLv3 terms. See `LICENSES.md` and `UPSTREAMS.md` for details.
+
+**Do not assume the whole project is MIT. It is not.**
+
 ## What this is
 
 This repo keeps the two runtimes isolated:
@@ -54,6 +68,26 @@ make setup-pyvt
 make setup-openvoice
 make download-openvoice
 make doctor
+```
+
+The default install does **not** require Demucs. Demucs is only needed for
+high-quality AI-based vocal separation. The default background extraction
+uses an ffmpeg fallback (center-channel pan filter).
+
+- Default doctor: passes without Demucs installed.
+- `make doctor-demucs`: fails if Demucs is missing.
+- `make doctor-strict`: fails on any optional warning.
+- `make doctor-checkpoints`: checks only OpenVoice checkpoints.
+
+Doctor flags:
+
+```bash
+python scripts/doctor.py                    # default: required checks only
+python scripts/doctor.py --need-demucs      # require Demucs
+python scripts/doctor.py --need-vocal-separation  # require Demucs
+python scripts/doctor.py --strict           # require everything
+python scripts/doctor.py --checkpoints-only # only check OpenVoice checkpoints
+python scripts/doctor.py --no-openvoice     # skip OpenVoice (pyVideoTrans-only)
 ```
 
 Checkpoints are not committed to git and are only downloaded when you explicitly run `make download-openvoice`.
@@ -150,8 +184,39 @@ speech is playing, and normalizes the final mix to streaming loudness.
 The wrapper runs the full pyVideoTrans VTV pipeline with OpenVoice, then
 rebuilds the dubbed audio track from the manifest and remuxes it into the
 final MP4. Job artifacts (manifest, segment WAVs, dubbed audio, review,
-remux command, report) are kept under
-`pyvideotrans-main/tmp/personal_dub/<timestamp>/`.
+remux command, report, job.json) are kept under
+`pyvideotrans-main/tmp/personal_dub/<job_id>/`.
+
+### Job directory safety
+
+The wrapper will **never** delete an existing job directory by default.
+If you pass `--job-dir` pointing to an existing directory, the run will
+fail with a clear error. To overwrite a job dir:
+
+1. It must be under `pyvideotrans-main/tmp/personal_dub/`
+2. It must contain a `.job-created-by-movie-dub` marker file
+3. You must pass `--force-overwrite-job-dir`
+
+External directories are never deleted automatically.
+
+### Demucs fallback
+
+If you request `--vocal-separation --vocal-separation-method demucs` but
+Demucs is not installed or crashes during inference, the pipeline
+automatically falls back to the ffmpeg center-channel pan filter. The
+build audio report includes `demucs_used`, `demucs_error`, and
+`ffmpeg_fallback_used` fields so you can verify which method was used.
+
+### LUFS normalization and sample rate
+
+LUFS normalization preserves the selected sample rate through the entire
+pipeline. If you request `--sample-rate 48000`, the output will be 48000 Hz.
+
+### Proof report
+
+`make proof` writes a machine-readable `reports/proof_report.json` with
+the result of every check (doctor, smoke tests, pyVideoTrans tests). This
+file is written even on failure, so you can inspect which check failed.
 
 ## Regenerate a Segment
 
@@ -159,7 +224,7 @@ If a segment sounds wrong, regenerate it and rebuild the final video:
 
 ```bash
 python scripts/regenerate_segment.py \
-  --job-dir pyvideotrans-main/tmp/personal_dub/<timestamp> \
+  --job-dir pyvideotrans-main/tmp/personal_dub/<job_id> \
   --segment-id 3 \
   --text "Corrected shorter line." \
   --remux
@@ -167,7 +232,8 @@ python scripts/regenerate_segment.py \
 
 `--remux` rebuilds `dubbed_audio.wav` from the updated manifest, remuxes
 `final_dubbed.mp4` in the job directory, and syncs the result to your
-configured output path. This works for both smoke jobs and personal dub jobs.
+configured output path. A `regeneration_report.json` is written to the
+job directory with hash verification of the old and new segment audio.
 
 **Warning:** Regeneration updates the job output video and overwrites the
 configured output MP4 path. Keep the job directory if you want future
@@ -175,6 +241,75 @@ segment repair. The canonical final video lives at
 `<job_dir>/final_dubbed.mp4` — the user output path is a synced copy.
 
 ## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `make doctor` fails on Demucs | Demucs not installed | Demucs is optional; default doctor should pass. Use `make doctor-demucs` only if you need it. |
+| `make doctor` fails on checkpoints | OpenVoice V2 checkpoints missing | Run `make download-openvoice` |
+| `make doctor` fails on ffmpeg/ffprobe | ffmpeg not installed | Run `make setup-ffmpeg` |
+| Job dir already exists error | `--job-dir` points to existing dir | Use `--force-overwrite-job-dir` (only works for marked dirs under `tmp/personal_dub/`) |
+| Demucs fallback to ffmpeg | Demucs not installed or crashed | Install Demucs or accept ffmpeg fallback (check `build_audio_report.json`) |
+| LUFS output has wrong sample rate | Old version used default 44100 | Fixed: LUFS now preserves the selected sample rate |
+| Final MP4 missing audio stream | Remux produced bad output | Verification now catches this; check `verification` in report |
+| Segment regeneration didn't update video | `--remux` not passed | Always pass `--remux` to rebuild audio + video |
+| `proof_report.json` says fail | One of the proof checks failed | Read the `failed_check` field in the report |
+| Config pollution after run | Old version restored missing keys as empty strings | Fixed: missing keys are now removed on restore |
+
+## Mac Acceptance Checklist
+
+Before considering the build ready, verify all of these on macOS:
+
+```bash
+# 1. Clean and set up from scratch
+make clean
+make setup-ffmpeg
+make setup-pyvt
+make setup-openvoice
+make download-openvoice
+
+# 2. Doctor passes (without Demucs)
+make doctor
+
+# 3. Proof passes and writes a report
+make proof
+cat reports/proof_report.json   # result must be "pass"
+
+# 4. Dub a test clip
+make dub INPUT=~/Movies/test-90s.mp4 OUTPUT=~/Movies/test-90s-dubbed.mp4 \
+     BACKGROUND_VOLUME=0.15 VOICE_VOLUME=1.1 DUCKING=1 TARGET_LUFS=-16
+
+# 5. Verify job artifacts exist
+ls pyvideotrans-main/tmp/personal_dub/*/job.json
+ls pyvideotrans-main/tmp/personal_dub/*/openvoice_manifest.json
+ls pyvideotrans-main/tmp/personal_dub/*/review_segments.json
+ls pyvideotrans-main/tmp/personal_dub/*/dubbed_audio.wav
+ls pyvideotrans-main/tmp/personal_dub/*/final_dubbed.mp4
+
+# 6. Verify final MP4 has video + audio
+ffprobe -v error -show_streams pyvideotrans-main/tmp/personal_dub/*/final_dubbed.mp4
+
+# 7. Regenerate a segment
+python scripts/regenerate_segment.py \
+  --job-dir <latest-job-dir> \
+  --segment-id 1 \
+  --text "replacement test line" \
+  --remux
+
+# 8. Check regeneration report
+cat <latest-job-dir>/regeneration_report.json
+```
+
+- `make doctor` passes without Demucs installed
+- `make doctor-demucs` fails if Demucs is missing
+- `reports/proof_report.json` exists and says `pass`
+- `job.json` exists in every job directory
+- Final MP4 has both video and audio streams
+- Duration is close to original (within 2s or 2%)
+- Segment regeneration updates manifest, audio, and video
+- No unsafe directory deletion is possible
+- No global temp scan is required for artifact discovery
+
+## Notes
 
 - `make doctor` is the source of truth for missing local setup.
 - Missing lines are treated as failure by default: `openvoice_allow_partial` defaults to `false`.

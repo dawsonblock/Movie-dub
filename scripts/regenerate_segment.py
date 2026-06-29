@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -65,6 +66,9 @@ def main() -> int:
         output_audio = Path(segment.get("output_audio") or generated_dir / f"{safe_id}.wav")
         if not output_audio.is_absolute():
             output_audio = job / output_audio
+
+        # Track the old segment path for proof (Blocker 10)
+        old_segment_path = output_audio if output_audio.is_file() else None
 
         stamp = int(time.time())
         queue_file = job / f"regenerate-{args.segment_id}-{stamp}.json"
@@ -140,6 +144,18 @@ def main() -> int:
         segment["status"] = "regenerated"
         write_json(review_file, review)
 
+        # Track old segment hash for proof (Blocker 10)
+        old_hash = ""
+        if old_segment_path and Path(old_segment_path).is_file():
+            old_hash = hashlib.sha256(
+                Path(old_segment_path).read_bytes()
+            ).hexdigest()[:16]
+
+        audio_rebuilt = False
+        video_remuxed = False
+        output_synced = False
+        synced_output = ""
+
         if args.remux:
             remux_file = job / "remux_command.json"
             if not remux_file.is_file():
@@ -151,16 +167,19 @@ def main() -> int:
                 mux_cmd = remux_cmd.get("command")
                 if build_cmd:
                     subprocess.run([str(part) for part in build_cmd], cwd=ROOT, check=True)
+                    audio_rebuilt = True
                 if mux_cmd:
                     subprocess.run([str(part) for part in mux_cmd], cwd=ROOT, check=True)
+                    video_remuxed = True
             elif isinstance(remux_cmd, list):
                 subprocess.run([str(part) for part in remux_cmd], cwd=job, check=True)
+                audio_rebuilt = True
+                video_remuxed = True
             else:
                 raise RuntimeError("remux_command.json must contain a command list or dict")
 
             # Sync the rebuilt job video to the user's requested output path
             # so the user sees the updated final MP4 without hunting in the job dir.
-            synced_output = ""
             report_file = job / "report.json"
             if report_file.is_file():
                 report_data = read_json(report_file)
@@ -169,6 +188,29 @@ def main() -> int:
                 if user_output and Path(job_video).is_file():
                     shutil.copy2(job_video, user_output)
                     synced_output = user_output
+                    output_synced = True
+
+        # Compute new segment hash for proof (Blocker 10)
+        new_hash = ""
+        if output_audio.is_file():
+            new_hash = hashlib.sha256(output_audio.read_bytes()).hexdigest()[:16]
+
+        # Write regeneration proof report (Blocker 10)
+        regen_report = {
+            "regenerated_segment_id": args.segment_id,
+            "old_segment_path": str(old_segment_path) if old_segment_path else "",
+            "new_segment_path": output_audio.as_posix(),
+            "old_segment_hash": old_hash,
+            "new_segment_hash": new_hash,
+            "hash_changed": old_hash != new_hash if old_hash else True,
+            "manifest_updated": manifest_file.is_file(),
+            "audio_rebuilt": audio_rebuilt,
+            "video_remuxed": video_remuxed,
+            "output_synced": output_synced,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        regen_report_path = job / "regeneration_report.json"
+        write_json(regen_report_path, regen_report)
 
         print("Regenerate segment: PASS")
         print(f"Segment: {args.segment_id}")
@@ -179,6 +221,7 @@ def main() -> int:
             print(f"Updated video: {job / 'final_dubbed.mp4'}")
             if synced_output:
                 print(f"Synced output: {synced_output}")
+        print(f"Report: {regen_report_path}")
         return 0
     except Exception as exc:
         print("Regenerate segment: FAIL", file=sys.stderr)

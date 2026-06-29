@@ -235,9 +235,9 @@ def main() -> int:
                         help="voice gender: auto/male/female "
                              "(default: auto-detect from audio)")
     parser.add_argument("--vocal-separation-method",
-                        choices=["ffmpeg", "demucs"], default="demucs",
-                        help="vocal removal: ffmpeg=center-pan (fast), "
-                             "demucs=AI (better)")
+                        choices=["ffmpeg", "demucs"], default="ffmpeg",
+                        help="vocal removal: ffmpeg=center-pan (fast, default), "
+                             "demucs=AI (better, requires model download)")
     parser.add_argument("--demucs-timeout", type=int, default=600,
                         help="timeout for Demucs vocal separation in seconds")
     parser.add_argument("--cpu-only", action="store_true",
@@ -254,8 +254,7 @@ def main() -> int:
                              "tmp/personal_dub/")
     parser.add_argument("--allow-external-job-dir-delete",
                         action="store_true",
-                        help="DANGEROUS: allow deleting a job dir outside "
-                             "tmp/personal_dub/. Only use for debugging.")
+                        help=argparse.SUPPRESS)  # hidden debug escape hatch
     parser.add_argument("--allow-partial", action="store_true",
                         help="allow the final remux even if some segments failed")
     parser.add_argument("--background-volume", type=float, default=0.0,
@@ -279,6 +278,16 @@ def main() -> int:
     parser.add_argument("--fail-if-background-mix-fails", action="store_true",
                         help="fail if background audio mixing fails "
                              "instead of silent speech-only output")
+    parser.add_argument("--allow-demucs-download", action="store_true",
+                        help="allow Demucs to download its model at runtime "
+                             "(default: refuse to download, fall back to ffmpeg)")
+    parser.add_argument("--no-demucs-download", action="store_true",
+                        help="explicitly refuse runtime Demucs model download "
+                             "(this is the default behavior)")
+    parser.add_argument("--legacy-artifact-scan", action="store_true",
+                        help="DEPRECATED: use global mtime scan to find "
+                             "manifest/queue/SRT instead of explicit paths. "
+                             "Only for debugging missing artifacts.")
     args = parser.parse_args()
 
     input_video = Path(args.input).expanduser().resolve()
@@ -380,6 +389,18 @@ def main() -> int:
     final_video_job = job_dir / "final_dubbed.mp4"
     review_path = job_dir / "review_segments.json"
     remux_path = job_dir / "remux_command.json"
+    # Job-scoped subtitles directory (Blocker 4): copy SRTs here instead of
+    # relying on global mtime scanning.
+    subtitles_dir = job_dir / "subtitles"
+    subtitles_dir.mkdir(parents=True, exist_ok=True)
+    job_srt = subtitles_dir / "translated.srt"
+
+    # Job-scoped explicit paths (Blocker 5): pass exact file paths to the
+    # OpenVoice provider so we never need global mtime scanning.
+    openvoice_queue = job_dir / "openvoice_queue.json"
+    openvoice_manifest_explicit = job_dir / "openvoice_manifest_explicit.json"
+    openvoice_logs = job_dir / "openvoice_bridge.log"
+    openvoice_work = job_dir / "openvoice_work"
 
     # --- Initialize job.json (Blocker 12) ---
     job_state = initial_job_state(
@@ -393,9 +414,12 @@ def main() -> int:
     )
     job_state["paths"].update({
         "openvoice_manifest": stable_manifest.as_posix(),
+        "openvoice_queue": openvoice_queue.as_posix(),
+        "openvoice_logs": openvoice_logs.as_posix(),
         "dubbed_audio": dubbed_audio.as_posix(),
         "final_video": final_video_job.as_posix(),
         "review_segments": review_path.as_posix(),
+        "subtitles_dir": subtitles_dir.as_posix(),
     })
     write_job_state(job_json_path, job_state)
 
@@ -424,12 +448,6 @@ def main() -> int:
         cfg = {}
     # Track original key state: {key: {"existed": bool, "value": any}}
     cfg_original: dict[str, dict] = {}
-    # Job-scoped explicit paths (Blocker 5): pass exact file paths to the
-    # OpenVoice provider so we never need global mtime scanning.
-    openvoice_queue = job_dir / "openvoice_queue.json"
-    openvoice_manifest_explicit = job_dir / "openvoice_manifest_explicit.json"
-    openvoice_logs = job_dir / "openvoice_bridge.log"
-    openvoice_work = job_dir / "openvoice_work"
     for key in (
         "openvoice_default_reference",
         PRESERVE_KEY,
@@ -437,6 +455,7 @@ def main() -> int:
         "openvoice_manifest_file",
         "openvoice_logs_file",
         "openvoice_work_dir",
+        "openvoice_allow_partial",
     ):
         cfg_original[key] = {
             "existed": key in cfg,
@@ -448,6 +467,7 @@ def main() -> int:
     cfg["openvoice_manifest_file"] = openvoice_manifest_explicit.as_posix()
     cfg["openvoice_logs_file"] = openvoice_logs.as_posix()
     cfg["openvoice_work_dir"] = openvoice_work.as_posix()
+    cfg["openvoice_allow_partial"] = bool(args.allow_partial)
     write_json(PYVT_CONFIG, cfg)
     # Log the active config for debugging
     print(f"Active config: reference={reference.as_posix()} "
@@ -511,14 +531,14 @@ def main() -> int:
             write_json(PYVT_CONFIG, current)
 
     # --- Locate the OpenVoice manifest (Blocker 5) ---
-    # Prefer the explicit job-scoped manifest path. Fall back to legacy
-    # global mtime scan only if the explicit path is missing (debug mode).
+    # Use the explicit job-scoped manifest path. Fall back to extracting
+    # from stdout/stderr only if the explicit path is missing.
+    # Global mtime scanning is only used behind --legacy-artifact-scan.
     manifest: Path | None = None
     if openvoice_manifest_explicit.is_file():
         shutil.copy2(openvoice_manifest_explicit, stable_manifest)
         manifest = stable_manifest
-    else:
-        # Legacy fallback: scan global tmp by mtime (not deterministic).
+    elif args.legacy_artifact_scan:
         legacy_manifest = latest_manifest(started)
         if legacy_manifest and legacy_manifest.is_file():
             print(
@@ -533,6 +553,29 @@ def main() -> int:
         if extracted:
             write_json(stable_manifest, extracted)
             manifest = stable_manifest
+
+    # --- Locate the SRT (Blocker 4) ---
+    # pyVideoTrans does not expose an explicit SRT output path via CLI.
+    # Instead of a global mtime scan, copy any SRT created during this run
+    # into the job's subtitles/ directory. If multiple SRTs exist, take the
+    # one matching the target language; otherwise take the newest.
+    srt_file: Path | None = None
+    if args.legacy_artifact_scan:
+        legacy_srt = latest_srt(started)
+        if legacy_srt and legacy_srt.is_file():
+            shutil.copy2(legacy_srt, job_srt)
+            srt_file = job_srt
+    else:
+        new_srts = [
+            p for p in (PYVIDEOTRANS / "tmp").rglob("*.srt")
+            if p.stat().st_mtime >= started
+        ]
+        if new_srts:
+            lang_lower = args.target_language.lower().replace("-", "")
+            lang_matches = [p for p in new_srts if lang_lower in p.name.lower()]
+            chosen = lang_matches[0] if lang_matches else max(new_srts, key=lambda p: p.stat().st_mtime)
+            shutil.copy2(chosen, job_srt)
+            srt_file = job_srt
 
     report = {
         "status": "fail",
@@ -594,6 +637,8 @@ def main() -> int:
         if args.vocal_separation:
             build_cmd.append("--vocal-separation")
             build_cmd.extend(["--vocal-separation-method", args.vocal_separation_method])
+            if args.allow_demucs_download:
+                build_cmd.append("--allow-demucs-download")
         if args.demucs_timeout != 600:
             build_cmd.extend(["--demucs-timeout", str(args.demucs_timeout)])
         if args.ducking:
@@ -647,9 +692,8 @@ def main() -> int:
         # --- Write review_segments.json + remux_command.json ---
         # remux_command points to the job dir final video so regeneration
         # rebuilds that, then syncs to the user output path via report.json.
-        # Prefer explicit job-scoped queue file (Blocker 5), fall back to legacy.
-        queue_file = openvoice_queue if openvoice_queue.is_file() else latest_queue(started)
-        srt_file = latest_srt(started)
+        # Use explicit job-scoped queue file (Blocker 5). No global mtime scan.
+        queue_file = openvoice_queue if openvoice_queue.is_file() else None
         _write_review_file(
             review_path, queue_file, stable_manifest, srt_file, job_dir, generated_audio
         )

@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import os
 import re
 import shutil
 import sys
@@ -170,15 +169,71 @@ def load_runtime(args: argparse.Namespace, device: str, language: str, base_spea
 
 
 def validate_checkpoint_dir(checkpoint_dir: str) -> Path:
+    """Validate OpenVoice V2 checkpoint directory (Blocker 5).
+
+    Checks that:
+    - converter/config.json exists and is valid JSON
+    - converter/checkpoint.pth exists, is not a Git LFS pointer, and is
+      large enough to be a real checkpoint
+    - base_speakers/ses/ has at least one .pth embedding file
+
+    Raises FileNotFoundError with a descriptive message if any check fails.
+    """
     ckpt_dir = Path(checkpoint_dir).expanduser()
     converter_dir = ckpt_dir / "converter"
     config_path = converter_dir / "config.json"
     checkpoint_path = converter_dir / "checkpoint.pth"
-    if not config_path.is_file() or not checkpoint_path.is_file():
+    if not config_path.is_file():
         raise FileNotFoundError(
-            "OpenVoice V2 converter checkpoint is missing. Expected "
-            f"{config_path} and {checkpoint_path}"
+            f"OpenVoice V2 converter config is missing: {config_path}"
         )
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(
+            f"OpenVoice V2 converter checkpoint is missing: {checkpoint_path}"
+        )
+    # Reject Git LFS / Xet pointer files
+    MIN_CHECKPOINT_BYTES = 1_000_000  # 1 MB
+    raw = checkpoint_path.read_bytes()[:512]
+    if raw.startswith(b"version https://git-lfs.github.com/spec/v1"):
+        raise FileNotFoundError(
+            f"OpenVoice checkpoint is a Git LFS pointer, not a real file: "
+            f"{checkpoint_path}. Run: make download-openvoice"
+        )
+    if raw.startswith(b"https://huggingface.co/xet"):
+        raise FileNotFoundError(
+            f"OpenVoice checkpoint is an Xet pointer, not a real file: "
+            f"{checkpoint_path}. Run: make download-openvoice"
+        )
+    ckpt_size = checkpoint_path.stat().st_size
+    if ckpt_size < MIN_CHECKPOINT_BYTES:
+        raise FileNotFoundError(
+            f"OpenVoice checkpoint is too small ({ckpt_size} bytes), "
+            f"likely corrupted or a stub: {checkpoint_path}. "
+            f"Run: make download-openvoice"
+        )
+    # Validate config.json is parseable JSON
+    try:
+        json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise FileNotFoundError(
+            f"OpenVoice config.json is not valid JSON: {config_path}: {exc}"
+        )
+    # Check base speaker embeddings exist
+    ses_dir = ckpt_dir / "base_speakers" / "ses"
+    if ses_dir.is_dir():
+        pth_files = list(ses_dir.glob("*.pth"))
+        if not pth_files:
+            raise FileNotFoundError(
+                f"No base speaker embedding .pth files in {ses_dir}. "
+                f"Run: make download-openvoice"
+            )
+        for pth in pth_files:
+            pth_raw = pth.read_bytes()[:512]
+            if pth_raw.startswith(b"version https://git-lfs.github.com/spec/v1"):
+                raise FileNotFoundError(
+                    f"Base speaker embedding is a Git LFS pointer: {pth}. "
+                    f"Run: make download-openvoice"
+                )
     return converter_dir
 
 

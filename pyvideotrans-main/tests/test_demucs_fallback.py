@@ -92,3 +92,70 @@ def test_demucs_success_no_fallback():
     assert result["demucs_requested"] is True
     assert result["demucs_used"] is True
     assert result["ffmpeg_fallback_used"] is False
+
+
+def test_demucs_model_not_cached_refuses_download(tmp_path):
+    """If Demucs model is not cached and allow_download=False, return None (Blocker 2)."""
+    input_video = tmp_path / "input.mp4"
+    input_video.write_bytes(b"\x00" * 100)
+    output_dir = tmp_path / "demucs_out"
+    output_dir.mkdir()
+
+    # Mock ffmpeg to create the raw audio file
+    def fake_run(cmd, **kwargs):
+        if len(cmd) > 1 and cmd[-1].endswith(".wav"):
+            Path(cmd[-1]).write_bytes(b"\x00" * 100)
+        return MagicMock(returncode=0)
+
+    with patch.object(build_audio, "local_ffmpeg", return_value="/fake/ffmpeg"), \
+         patch("subprocess.run", side_effect=fake_run), \
+         patch.dict("sys.modules", {
+             "demucs": MagicMock(),
+             "torch": MagicMock(),
+             "torchaudio": MagicMock(),
+             "demucs.pretrained": MagicMock(),
+             "demucs.apply": MagicMock(),
+         }):
+        # Simulate get_model raising an error (model not cached)
+        import sys as _sys
+        demucs_pretrained = _sys.modules["demucs.pretrained"]
+        demucs_pretrained.get_model = MagicMock(side_effect=RuntimeError("Model not cached"))
+        result = build_audio._demucs_vocal_separation(
+            input_video, output_dir, timeout=10, allow_download=False,
+        )
+
+    assert result is None, "should return None when model not cached and download refused"
+
+
+def test_demucs_model_not_cached_allows_download_when_flag_set(tmp_path):
+    """If allow_download=True, should attempt to load the model (Blocker 2)."""
+    input_video = tmp_path / "input.mp4"
+    input_video.write_bytes(b"\x00" * 100)
+    output_dir = tmp_path / "demucs_out"
+    output_dir.mkdir()
+
+    def fake_run(cmd, **kwargs):
+        if len(cmd) > 1 and cmd[-1].endswith(".wav"):
+            Path(cmd[-1]).write_bytes(b"\x00" * 100)
+        return MagicMock(returncode=0)
+
+    with patch.object(build_audio, "local_ffmpeg", return_value="/fake/ffmpeg"), \
+         patch("subprocess.run", side_effect=fake_run), \
+         patch.dict("sys.modules", {
+             "demucs": MagicMock(),
+             "torch": MagicMock(),
+             "torchaudio": MagicMock(),
+             "demucs.pretrained": MagicMock(),
+             "demucs.apply": MagicMock(),
+         }):
+        import sys as _sys
+        demucs_pretrained = _sys.modules["demucs.pretrained"]
+        # get_model raises — with allow_download=True it should re-raise
+        demucs_pretrained.get_model = MagicMock(side_effect=RuntimeError("Download failed"))
+        try:
+            build_audio._demucs_vocal_separation(
+                input_video, output_dir, timeout=10, allow_download=True,
+            )
+            assert False, "should have raised"
+        except RuntimeError as exc:
+            assert "Download failed" in str(exc)

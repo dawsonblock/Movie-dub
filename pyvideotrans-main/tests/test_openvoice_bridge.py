@@ -49,7 +49,7 @@ def test_validate_checkpoint_dir_requires_converter_files(tmp_path):
     converter = tmp_path / "converter"
     converter.mkdir()
     (converter / "config.json").write_text("{}", encoding="utf-8")
-    (converter / "checkpoint.pth").write_bytes(b"fake")
+    (converter / "checkpoint.pth").write_bytes(b"\x00" * 1_100_000)
 
     assert openvoice_segment_tts.validate_checkpoint_dir(tmp_path.as_posix()) == converter
 
@@ -68,7 +68,7 @@ def test_empty_text_segment_is_counted_as_skipped(tmp_path, monkeypatch):
     converter = checkpoint_dir / "converter"
     converter.mkdir(parents=True)
     (converter / "config.json").write_text("{}", encoding="utf-8")
-    (converter / "checkpoint.pth").write_bytes(b"fake")
+    (converter / "checkpoint.pth").write_bytes(b"\x00" * 1_100_000)
     openvoice_repo = tmp_path / "OpenVoice-main"
     openvoice_repo.mkdir()
     queue_file = tmp_path / "queue.json"

@@ -111,12 +111,13 @@ generate-voices:
 #           VOCAL_SEPARATION_METHOD=demucs DUCKING=1 TARGET_LUFS=-16
 #           NO_NORMALIZE=1 FINAL_GAIN=1.0
 #           BACKGROUND_TIMEOUT=900 LUFS_TIMEOUT=1200 FAIL_IF_BACKGROUND_MIX_FAILS=1
-#           DEMUCS_TIMEOUT=900
+#           DEMUCS_TIMEOUT=900 ALLOW_DEMUCS_DOWNLOAD=1
 dub:
 	@if [ -z "$(INPUT)" ] || [ -z "$(OUTPUT)" ]; then \
 		echo "Usage: make dub INPUT=<input.mp4> OUTPUT=<output.mp4>"; \
 		echo "  SOURCE=auto TARGET=en GENDER=auto MODEL=whisper-large-v3-turbo"; \
-		echo "  BACKGROUND_VOLUME=0.15 VOCAL_SEPARATION=1 VOCAL_SEPARATION_METHOD=demucs"; \
+		echo "  BACKGROUND_VOLUME=0.15 VOCAL_SEPARATION=1 VOCAL_SEPARATION_METHOD=ffmpeg"; \
+		echo "  For AI separation: VOCAL_SEPARATION_METHOD=demucs ALLOW_DEMUCS_DOWNLOAD=1"; \
 		echo "  DUCKING=1"; \
 		exit 1; \
 	fi
@@ -139,5 +140,6 @@ dub:
 		$(if $(BACKGROUND_TIMEOUT),--background-timeout $(BACKGROUND_TIMEOUT)) \
 		$(if $(LUFS_TIMEOUT),--lufs-timeout $(LUFS_TIMEOUT)) \
 		$(if $(DEMUCS_TIMEOUT),--demucs-timeout $(DEMUCS_TIMEOUT)) \
+		$(if $(ALLOW_DEMUCS_DOWNLOAD),--allow-demucs-download) \
 		$(if $(CPU_ONLY),--cpu-only) \
 		$(if $(FAIL_IF_BACKGROUND_MIX_FAILS),--fail-if-background-mix-fails)

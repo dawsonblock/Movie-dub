@@ -256,7 +256,8 @@ def normalize(samples, target_peak: float = 0.97):
 
 
 def _demucs_vocal_separation(
-    input_video: Path, output_dir: Path, timeout: int = 600
+    input_video: Path, output_dir: Path, timeout: int = 600,
+    allow_download: bool = False,
 ) -> Path | None:
     """Use Demucs (AI source separation) to extract instrumental/no-vocals track.
 
@@ -264,6 +265,10 @@ def _demucs_vocal_separation(
     We combine drums+bass+other into a single "no vocals" WAV.
 
     Returns path to the no-vocals WAV, or None if separation failed.
+
+    If allow_download is False (the default), refuses to trigger a runtime
+    model download. If the model is not already cached, returns None so the
+    caller falls back to ffmpeg.
     """
     # First extract audio from video
     raw_audio = output_dir / "demucs_input.wav"
@@ -304,7 +309,21 @@ def _demucs_vocal_separation(
         from demucs.apply import apply_model
 
         device = "mps" if torch.backends.mps.is_available() else "cpu"
-        model = get_model("htdemucs")
+        # Check if the model is already cached. If not, and allow_download is
+        # False, refuse to download and return None so the caller falls back
+        # to ffmpeg.
+        try:
+            model = get_model("htdemucs")
+        except Exception as exc:
+            if not allow_download:
+                print(
+                    f"WARNING: Demucs model not cached and --allow-demucs-download "
+                    f"not set. Falling back to ffmpeg. Error: {exc}",
+                    file=sys.stderr,
+                )
+                return None
+            # Re-raise to let the caller's exception boundary handle it
+            raise
         model.to(device)
 
         import torchaudio
@@ -338,6 +357,7 @@ def _mix_background_audio(
     speech_regions: list[tuple[int, int]] | None = None,
     timeout: int = 300,
     demucs_timeout: int = 600,
+    allow_demucs_download: bool = False,
 ) -> dict:
     """Extract original audio from the input video and mix it under the speech canvas.
 
@@ -379,7 +399,8 @@ def _mix_background_audio(
             demucs_dir = Path(tempfile.mkdtemp(prefix="demucs_"))
             try:
                 no_vocals = _demucs_vocal_separation(
-                    input_video, demucs_dir, timeout=demucs_timeout
+                    input_video, demucs_dir, timeout=demucs_timeout,
+                    allow_download=allow_demucs_download,
                 )
                 if no_vocals and no_vocals.is_file():
                     # Convert no_vocals to the target sample rate and mono
@@ -560,6 +581,7 @@ def build_dubbed_audio(
     lufs_timeout: int = 600,
     fail_if_background_mix_fails: bool = False,
     demucs_timeout: int = 600,
+    allow_demucs_download: bool = False,
 ) -> dict:
     manifest = read_json(manifest_path)
     segments = manifest_segments(manifest)
@@ -658,6 +680,7 @@ def build_dubbed_audio(
             speech_regions=speech_regions if ducking else None,
             timeout=background_timeout,
             demucs_timeout=demucs_timeout,
+            allow_demucs_download=allow_demucs_download,
         )
         bg_report.update(bg_result)
         background_mix = bg_result["background_mix_applied"]
@@ -765,6 +788,9 @@ def main() -> int:
     parser.add_argument("--demucs-timeout", type=int, default=600,
                         help="timeout for Demucs vocal separation "
                              "in seconds (default 600)")
+    parser.add_argument("--allow-demucs-download", action="store_true",
+                        help="allow Demucs to download its model at runtime "
+                             "(default: refuse, fall back to ffmpeg)")
     parser.add_argument("--ducking", action="store_true",
                         help="lower background volume "
                              "where dubbed speech is present")
@@ -808,6 +834,7 @@ def main() -> int:
             lufs_timeout=args.lufs_timeout,
             fail_if_background_mix_fails=args.fail_if_background_mix_fails,
             demucs_timeout=args.demucs_timeout,
+            allow_demucs_download=args.allow_demucs_download,
         )
         print("Build dubbed audio: PASS")
         print(f"Output: {output_audio}")

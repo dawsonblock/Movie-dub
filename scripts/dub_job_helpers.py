@@ -220,9 +220,18 @@ def write_review_file(
         segment_id = item.get("id", item.get("line", index + 1))
         result = manifest_by_id.get(str(segment_id), {})
         timing = result.get("timing_status", "unknown")
-        status = "needs_review" if timing in {
+        # Propagate manifest result status (Blocker 6): if the manifest
+        # says the segment failed/skipped/errored, the review must reflect
+        # that — not lie with "ok".
+        manifest_status = result.get("status", "ok")
+        if manifest_status and manifest_status != "ok":
+            status = manifest_status
+        elif timing in {
             "rewrite_shorter", "padding_or_slowdown_candidate"
-        } else "ok"
+        }:
+            status = "needs_review"
+        else:
+            status = "ok"
         if "start_time" in item or "end_time" in item:
             start = float(item.get("start_time", 0.0)) / 1000.0
             end = float(item.get("end_time", 0.0)) / 1000.0

@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Run the included short MP4 through pyVideoTrans with OpenVoice TTS."""
+"""Run the included short MP4 through pyVideoTrans with OpenVoice TTS.
+
+This smoke test uses the same deterministic job-scoped architecture as
+run_personal_dub.py: explicit OpenVoice queue/manifest/log paths via
+pyVideoTrans config, no global mtime scanning, and full config
+restoration.
+"""
 
 from __future__ import annotations
 
@@ -32,10 +38,17 @@ DUBBED_AUDIO_PATH = JOB_DIR / "dubbed_audio.wav"
 FINAL_VIDEO_PATH = JOB_DIR / "final_dubbed.mp4"
 STABLE_MANIFEST_PATH = JOB_DIR / "openvoice_manifest.json"
 GENERATED_AUDIO_DIR = JOB_DIR / "generated_audio"
+SUBTITLES_DIR = JOB_DIR / "subtitles"
 BUILD_AUDIO_SCRIPT = ROOT / "scripts" / "build_dubbed_audio_from_manifest.py"
 REMUX_SCRIPT = ROOT / "scripts" / "remux_dubbed_video.py"
 PYVT_CONFIG = PYVIDEOTRANS / "videotrans" / "cfg.json"
 PRESERVE_KEY = "openvoice_preserve_dir"
+
+# Job-scoped explicit paths (same as run_personal_dub.py)
+OPENVOICE_QUEUE = JOB_DIR / "openvoice_queue.json"
+OPENVOICE_MANIFEST_EXPLICIT = JOB_DIR / "openvoice_manifest_explicit.json"
+OPENVOICE_LOGS = JOB_DIR / "openvoice_bridge.log"
+OPENVOICE_WORK = JOB_DIR / "openvoice_work"
 
 
 def local_ffprobe() -> str:
@@ -60,23 +73,6 @@ def ffprobe_duration(path: Path) -> float:
         check=True,
     )
     return float(result.stdout.strip())
-
-
-def latest_artifact(start_time: float, pattern: str) -> Path | None:
-    candidates = [
-        path
-        for path in (PYVIDEOTRANS / "tmp").glob(pattern)
-        if path.stat().st_mtime >= start_time
-    ]
-    return max(candidates, key=lambda path: path.stat().st_mtime) if candidates else None
-
-
-def latest_manifest(start_time: float) -> Path | None:
-    return latest_artifact(start_time, "**/openvoice-manifest-*.json")
-
-
-def latest_queue(start_time: float) -> Path | None:
-    return latest_artifact(start_time, "**/openvoice-queue-*.json")
 
 
 def newest_mp4(output_dir: Path, start_time: float) -> Path | None:
@@ -129,36 +125,60 @@ def run_remux_dubbed_video() -> tuple[bool, str]:
     return result.returncode == 0, f"{result.stdout}\n{result.stderr}"
 
 
-def set_preserve_dir() -> str | None:
-    """Point OpenVoice segment WAV preservation at the job's generated_audio dir.
+def configure_pyvt_config() -> dict[str, dict]:
+    """Set job-scoped explicit paths in pyVideoTrans config.
 
-    Returns the previous value so it can be restored after the run.
+    Returns a dict of {key: {"existed": bool, "value": any}} for restoration.
     """
-    if not PYVT_CONFIG.is_file():
-        return None
-    try:
-        cfg = json.loads(PYVT_CONFIG.read_text(encoding="utf-8"))
-    except Exception:
+    PYVT_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    if PYVT_CONFIG.is_file():
+        try:
+            cfg = json.loads(PYVT_CONFIG.read_text(encoding="utf-8"))
+        except Exception:
+            cfg = {}
+    else:
         cfg = {}
-    previous = cfg.get(PRESERVE_KEY, "")
+
+    cfg_original: dict[str, dict] = {}
+    for key in (
+        PRESERVE_KEY,
+        "openvoice_queue_file",
+        "openvoice_manifest_file",
+        "openvoice_logs_file",
+        "openvoice_work_dir",
+    ):
+        cfg_original[key] = {
+            "existed": key in cfg,
+            "value": cfg.get(key),
+        }
     GENERATED_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    OPENVOICE_WORK.mkdir(parents=True, exist_ok=True)
     cfg[PRESERVE_KEY] = GENERATED_AUDIO_DIR.as_posix()
+    cfg["openvoice_queue_file"] = OPENVOICE_QUEUE.as_posix()
+    cfg["openvoice_manifest_file"] = OPENVOICE_MANIFEST_EXPLICIT.as_posix()
+    cfg["openvoice_logs_file"] = OPENVOICE_LOGS.as_posix()
+    cfg["openvoice_work_dir"] = OPENVOICE_WORK.as_posix()
     PYVT_CONFIG.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-    return previous
+    return cfg_original
 
 
-def restore_preserve_dir(previous: str | None) -> None:
-    if previous is None or not PYVT_CONFIG.is_file():
+def restore_pyvt_config(cfg_original: dict[str, dict]) -> None:
+    """Restore pyVideoTrans config to its original state."""
+    if not PYVT_CONFIG.is_file():
         return
     try:
-        cfg = json.loads(PYVT_CONFIG.read_text(encoding="utf-8"))
+        current = json.loads(PYVT_CONFIG.read_text(encoding="utf-8"))
     except Exception:
-        cfg = {}
-    cfg[PRESERVE_KEY] = previous
-    PYVT_CONFIG.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        current = {}
+    for key, state in cfg_original.items():
+        if state["existed"]:
+            current[key] = state["value"]
+        else:
+            current.pop(key, None)
+    PYVT_CONFIG.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def write_review_file(queue_file: Path | None, manifest_file: Path | None, srt_file: Path) -> None:
+def write_review_file(queue_file: Path | None, manifest_file: Path | None, srt_file: Path | None) -> None:
     _write_review_file(
         REVIEW_PATH, queue_file, manifest_file, srt_file, JOB_DIR, GENERATED_AUDIO_DIR
     )
@@ -174,15 +194,14 @@ def main() -> int:
         return 1
 
     if JOB_DIR.exists():
-        # Safe deletion: JOB_DIR is under tmp/e2e_short_clip, not personal_dub,
-        # so we use allow_external=True since this is a controlled smoke test dir.
         create_job_dir(JOB_DIR, force=True, allow_external=True)
     else:
         create_job_dir(JOB_DIR, force=False, allow_external=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    SUBTITLES_DIR.mkdir(parents=True, exist_ok=True)
 
     started = time.time()
-    previous_preserve = set_preserve_dir()
+    cfg_original = configure_pyvt_config()
     cmd = [
         py_python.as_posix(),
         "cli.py",
@@ -212,19 +231,38 @@ def main() -> int:
     try:
         result = subprocess.run(cmd, cwd=PYVIDEOTRANS, text=True, capture_output=True)
     finally:
-        restore_preserve_dir(previous_preserve)
+        restore_pyvt_config(cfg_original)
     final_video = newest_mp4(OUTPUT_DIR, started) or OUTPUT_DIR / INPUT_VIDEO.name
-    manifest = latest_manifest(started)
-    queue_file = latest_queue(started)
+
+    # --- Locate manifest (explicit path, no global mtime scan) ---
+    manifest: Path | None = None
+    if OPENVOICE_MANIFEST_EXPLICIT.is_file():
+        shutil.copy2(OPENVOICE_MANIFEST_EXPLICIT, STABLE_MANIFEST_PATH)
+        manifest = STABLE_MANIFEST_PATH
     if not manifest:
         extracted_manifest = _extract_manifest_from_output(f"{result.stdout}\n{result.stderr}")
         if extracted_manifest:
-            write_json = json.dumps(extracted_manifest, ensure_ascii=False, indent=2)
-            STABLE_MANIFEST_PATH.write_text(write_json, encoding="utf-8")
+            STABLE_MANIFEST_PATH.write_text(
+                json.dumps(extracted_manifest, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
             manifest = STABLE_MANIFEST_PATH
-    elif manifest.is_file() and manifest != STABLE_MANIFEST_PATH:
-        shutil.copy2(manifest, STABLE_MANIFEST_PATH)
-        manifest = STABLE_MANIFEST_PATH
+
+    # --- Locate queue (explicit path, no global mtime scan) ---
+    queue_file = OPENVOICE_QUEUE if OPENVOICE_QUEUE.is_file() else None
+
+    # --- Locate SRT (copy newly created SRTs into job dir) ---
+    srt_file: Path | None = None
+    job_srt = SUBTITLES_DIR / "translated.srt"
+    new_srts = [
+        p for p in (PYVIDEOTRANS / "tmp").rglob("*.srt")
+        if p.stat().st_mtime >= started
+    ]
+    if new_srts:
+        chosen = max(new_srts, key=lambda p: p.stat().st_mtime)
+        shutil.copy2(chosen, job_srt)
+        srt_file = job_srt
+
     report = {
         "status": "fail",
         "input_video": INPUT_VIDEO.as_posix(),
@@ -268,7 +306,7 @@ def main() -> int:
             raise RuntimeError("OpenVoice manifest was not found")
         if report["segments_ok"] < 1:
             raise RuntimeError("OpenVoice manifest has no successful segment")
-        write_review_file(queue_file, manifest, OUTPUT_DIR / "en.srt")
+        write_review_file(queue_file, manifest, srt_file)
         write_remux_command()
         # Build the real dubbed audio track from the manifest.
         audio_ok, audio_log = run_build_dubbed_audio()

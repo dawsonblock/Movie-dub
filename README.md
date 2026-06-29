@@ -199,13 +199,29 @@ fail with a clear error. To overwrite a job dir:
 
 External directories are never deleted automatically.
 
-### Demucs fallback
+### Demucs fallback and model download policy
 
-If you request `--vocal-separation --vocal-separation-method demucs` but
-Demucs is not installed or crashes during inference, the pipeline
-automatically falls back to the ffmpeg center-channel pan filter. The
-build audio report includes `demucs_used`, `demucs_error`, and
-`ffmpeg_fallback_used` fields so you can verify which method was used.
+The default vocal separation method is **ffmpeg** (center-channel pan filter).
+Demucs (AI-based separation) is opt-in and requires an explicit flag:
+
+```bash
+# Default: ffmpeg vocal separation (fast, no model download)
+make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 VOCAL_SEPARATION=1
+
+# Demucs: requires model download permission
+make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 \
+     VOCAL_SEPARATION=1 VOCAL_SEPARATION_METHOD=demucs ALLOW_DEMUCS_DOWNLOAD=1
+```
+
+Demucs will **never** download its model at runtime unless you pass
+`--allow-demucs-download` (or `ALLOW_DEMUCS_DOWNLOAD=1` in the Makefile).
+If the model is not already cached and download is not allowed, the pipeline
+falls back to ffmpeg automatically.
+
+If Demucs is not installed or crashes during inference, the pipeline also
+falls back to ffmpeg. The build audio report includes `demucs_used`,
+`demucs_error`, and `ffmpeg_fallback_used` fields so you can verify which
+method was used.
 
 ### LUFS normalization and sample rate
 
@@ -248,11 +264,15 @@ segment repair. The canonical final video lives at
 | `make doctor` fails on checkpoints | OpenVoice V2 checkpoints missing | Run `make download-openvoice` |
 | `make doctor` fails on ffmpeg/ffprobe | ffmpeg not installed | Run `make setup-ffmpeg` |
 | Job dir already exists error | `--job-dir` points to existing dir | Use `--force-overwrite-job-dir` (only works for marked dirs under `tmp/personal_dub/`) |
-| Demucs fallback to ffmpeg | Demucs not installed or crashed | Install Demucs or accept ffmpeg fallback (check `build_audio_report.json`) |
+| Demucs fallback to ffmpeg | Demucs not installed, crashed, or model not cached | Install Demucs + `--allow-demucs-download`, or accept ffmpeg fallback (check `build_audio_report.json`) |
+| Demucs model download at runtime | Default refuses download | Pass `--allow-demucs-download` explicitly |
 | LUFS output has wrong sample rate | Old version used default 44100 | Fixed: LUFS now preserves the selected sample rate |
 | Final MP4 missing audio stream | Remux produced bad output | Verification now catches this; check `verification` in report |
 | Segment regeneration didn't update video | `--remux` not passed | Always pass `--remux` to rebuild audio + video |
 | `proof_report.json` says fail | One of the proof checks failed | Read the `failed_check` field in the report |
+| Review says "ok" for failed segment | Old version ignored manifest status | Fixed: review now propagates manifest `status` field |
+| Bridge crashes on torch.load | Checkpoint is LFS pointer or corrupted | Bridge now validates checkpoints before loading; run `make download-openvoice` |
+| `--allow-partial` not working | Old version didn't wire it to provider | Fixed: `openvoice_allow_partial` now set in config |
 | Config pollution after run | Old version restored missing keys as empty strings | Fixed: missing keys are now removed on restore |
 
 ## Mac Acceptance Checklist

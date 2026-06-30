@@ -71,6 +71,15 @@ PYVT_CONFIG = PYVIDEOTRANS / "videotrans" / "cfg.json"
 PRESERVE_KEY = "openvoice_preserve_dir"
 HUGGINGFACE_ASR_PROVIDER = "4"  # HuggingFace ASR for whisper-large-v3-turbo
 
+# Bridge scripts for the split pipeline
+OPENVOICE_BRIDGE_SCRIPT = ROOT / "bridge" / "openvoice_segment_tts.py"
+QWEN3_BRIDGE_SCRIPT = ROOT / "bridge" / "qwen3_segment_tts.py"
+
+# Default Qwen3-TTS model (MLX 4-bit, 0.6B, supports voice cloning)
+QWEN3_DEFAULT_MODEL = "aufklarer/Qwen3-TTS-12Hz-0.6B-Base-MLX-4bit"
+# Local path fallback (if downloaded to models/)
+QWEN3_LOCAL_MODEL = ROOT / "models" / "Qwen3-TTS-12Hz-0.6B-Base-MLX-4bit"
+
 # TTS engine -> pyVideoTrans provider index (videotrans/tts/__init__.py)
 # openvoice   -> 34 (OpenVoice V2 local, current default)
 # qwen3-local -> 1  (Qwen3-TTS local built-in)
@@ -387,6 +396,57 @@ def run_openvoice_bridge_direct(
     return result
 
 
+def run_qwen3_bridge_direct(
+    queue_tts: list[dict],
+    manifest_path: Path,
+    queue_path: Path,
+    work_dir: Path,
+    logs_path: Path,
+    preserve_dir: Path,
+    bridge_script: Path,
+    model_path: str,
+    language: str = "auto",
+    temperature: float = 0.9,
+    speed: float = 1.0,
+    allow_partial: bool = False,
+) -> subprocess.CompletedProcess:
+    """Run the Qwen3-TTS bridge directly with a pre-built queue_tts.
+
+    This is the Qwen3 equivalent of run_openvoice_bridge_direct. It uses
+    mlx-audio for on-device Apple Silicon inference with per-speaker
+    voice cloning via ref_audio.
+    """
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+    queue_path.write_text(
+        json.dumps(queue_tts, ensure_ascii=False), encoding="utf-8",
+    )
+    work_dir.mkdir(parents=True, exist_ok=True)
+    preserve_dir.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        sys.executable,
+        bridge_script.as_posix(),
+        "--queue-tts-file", queue_path.as_posix(),
+        "--manifest-file", manifest_path.as_posix(),
+        "--work-dir", work_dir.as_posix(),
+        "--model-path", model_path,
+        "--language", language,
+        "--temperature", str(temperature),
+        "--speed", str(speed),
+        "--logs-file", logs_path.as_posix(),
+        "--preserve-dir", preserve_dir.as_posix(),
+    ]
+    result = run_subprocess(cmd, ROOT, "qwen3-bridge-direct")
+    # Bridge returns exit code 2 for partial success (some segments ok, some
+    # failed). When allow_partial is True, treat exit code 2 as success (0).
+    if allow_partial and result.returncode == 2:
+        print("Qwen3-TTS bridge: partial success (exit 2) accepted via --allow-partial")
+        return subprocess.CompletedProcess(
+            args=result.args, returncode=0, stdout=result.stdout, stderr=result.stderr,
+        )
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Dub a personal video with pyVideoTrans + OpenVoice V2"
@@ -493,6 +553,14 @@ def main() -> int:
                         choices=list(TTS_ENGINE_MAP.keys()) + ["none"],
                         default="none",
                         help="fallback TTS engine if primary fails (default: none)")
+    # --- Qwen3-TTS options (only used when --tts-engine qwen3-local) ---
+    parser.add_argument("--qwen3-model", default=QWEN3_DEFAULT_MODEL,
+                        help=f"Qwen3-TTS model path or HF repo ID "
+                             f"(default: {QWEN3_DEFAULT_MODEL})")
+    parser.add_argument("--qwen3-temperature", type=float, default=0.9,
+                        help="Qwen3-TTS sampling temperature (default: 0.9)")
+    parser.add_argument("--qwen3-speed", type=float, default=1.0,
+                        help="Qwen3-TTS speech speed multiplier (default: 1.0)")
     # --- Post-generation pitch verification (Blocker 6) ---
     parser.add_argument("--verify-pitch", action="store_true",
                         help="run post-generation pitch verification against "
@@ -642,29 +710,30 @@ def main() -> int:
     speaker_profiles_data: dict | None = None
     use_split_pipeline = bool(args.speaker_profiling or args.speaker_profile_json)
     if use_split_pipeline:
-        # The split pipeline uses the OpenVoice bridge directly for per-speaker
-        # ref_wav routing. Qwen3-TTS and OmniVoice do not have bridge
-        # implementations yet, so accepting them here would be a lie — the
-        # code would silently fall through to OpenVoice regardless of the
-        # --tts-engine flag. Reject them explicitly until real bridges exist.
-        SUPPORTED_SPLIT_ENGINES = {"openvoice"}
+        # The split pipeline uses bridge scripts directly for per-speaker
+        # ref_wav routing. Only engines with a bridge implementation are
+        # supported here. OmniVoice has no bridge yet, so accepting it
+        # would be a lie — the code would silently fall through to OpenVoice
+        # regardless of the --tts-engine flag.
+        SUPPORTED_SPLIT_ENGINES = {"openvoice", "qwen3-local"}
         if args.tts_engine not in SUPPORTED_SPLIT_ENGINES:
             return die(
                 f"--tts-engine '{args.tts_engine}' is not supported in "
-                f"speaker-profiling mode. The split pipeline requires the "
-                f"OpenVoice bridge for per-speaker ref_wav routing, but "
+                f"speaker-profiling mode. The split pipeline requires a "
+                f"bridge script for per-speaker ref_wav routing, but "
                 f"'{args.tts_engine}' has no bridge implementation. "
                 f"Either drop --speaker-profiling / --speaker-profile-json "
                 f"to use the VTV pipeline (which supports all engines), or "
-                f"use --tts-engine openvoice. Supported engines in split "
-                f"mode: {', '.join(sorted(SUPPORTED_SPLIT_ENGINES))}."
+                f"use --tts-engine openvoice or --tts-engine qwen3-local. "
+                f"Supported engines in split mode: "
+                f"{', '.join(sorted(SUPPORTED_SPLIT_ENGINES))}."
             )
         if args.fallback_tts_engine != "none" and args.fallback_tts_engine not in SUPPORTED_SPLIT_ENGINES:
             return die(
                 f"--fallback-tts-engine '{args.fallback_tts_engine}' is not "
                 f"supported in speaker-profiling mode for the same reason. "
-                f"Use --fallback-tts-engine none or --fallback-tts-engine "
-                f"openvoice. Supported: {', '.join(sorted(SUPPORTED_SPLIT_ENGINES))}."
+                f"Use --fallback-tts-engine none, openvoice, or qwen3-local. "
+                f"Supported: {', '.join(sorted(SUPPORTED_SPLIT_ENGINES))}."
             )
         speakers_dir.mkdir(parents=True, exist_ok=True)
         if args.speaker_profile_json:
@@ -910,47 +979,75 @@ def main() -> int:
             return die("no TTS queue items built from translated SRT + speaker profiles")
         print(f"Built {len(queue_tts)} TTS queue items with per-speaker ref_wav")
 
-        # --- Step 5: Run OpenVoice bridge directly ---
-        openvoice_python = OPENVOICE / ".venv" / "bin" / "python"
-        bridge_script = ROOT / "bridge" / "openvoice_segment_tts.py"
-        openvoice_repo = OPENVOICE
-        checkpoint_dir = OPENVOICE / "checkpoints_v2"
-        if not openvoice_python.is_file():
-            return die(f"OpenVoice venv python missing: {openvoice_python}")
-        if not bridge_script.is_file():
-            return die(f"OpenVoice bridge script missing: {bridge_script}")
-        if not (checkpoint_dir / "converter" / "checkpoint.pth").is_file():
-            return die(f"OpenVoice checkpoints missing: {checkpoint_dir}")
-
-        # Normalize language for OpenVoice
-        ov_lang = args.target_language.upper()
-        if ov_lang.startswith("ZH"):
-            ov_lang = "ZH"
-        elif ov_lang.startswith("EN"):
-            ov_lang = "EN"
-
+        # --- Step 5: Run TTS bridge directly ---
+        # Dispatch to the correct bridge based on the selected engine.
+        # Each bridge accepts the same queue_tts format and produces the
+        # same manifest format, so downstream code is engine-agnostic.
         device = "cpu" if args.cpu_only else "auto"
         started = time.time()
-        bridge_result = run_openvoice_bridge_direct(
-            queue_tts=queue_tts,
-            manifest_path=openvoice_manifest_explicit,
-            queue_path=openvoice_queue,
-            work_dir=openvoice_work,
-            logs_path=openvoice_logs,
-            preserve_dir=generated_audio,
-            openvoice_python=openvoice_python,
-            bridge_script=bridge_script,
-            openvoice_repo=openvoice_repo,
-            checkpoint_dir=checkpoint_dir,
-            language=ov_lang,
-            device=device,
-            allow_partial=args.allow_partial,
-        )
+
+        def _run_bridge(engine: str, q_tts: list[dict]) -> subprocess.CompletedProcess:
+            """Dispatch to the correct TTS bridge for the given engine."""
+            if engine == "openvoice":
+                openvoice_python = OPENVOICE / ".venv" / "bin" / "python"
+                if not openvoice_python.is_file():
+                    return die(f"OpenVoice venv python missing: {openvoice_python}")
+                if not OPENVOICE_BRIDGE_SCRIPT.is_file():
+                    return die(f"OpenVoice bridge script missing: {OPENVOICE_BRIDGE_SCRIPT}")
+                checkpoint_dir = OPENVOICE / "checkpoints_v2"
+                if not (checkpoint_dir / "converter" / "checkpoint.pth").is_file():
+                    return die(f"OpenVoice checkpoints missing: {checkpoint_dir}")
+                # Normalize language for OpenVoice
+                ov_lang = args.target_language.upper()
+                if ov_lang.startswith("ZH"):
+                    ov_lang = "ZH"
+                elif ov_lang.startswith("EN"):
+                    ov_lang = "EN"
+                return run_openvoice_bridge_direct(
+                    queue_tts=q_tts,
+                    manifest_path=openvoice_manifest_explicit,
+                    queue_path=openvoice_queue,
+                    work_dir=openvoice_work,
+                    logs_path=openvoice_logs,
+                    preserve_dir=generated_audio,
+                    openvoice_python=openvoice_python,
+                    bridge_script=OPENVOICE_BRIDGE_SCRIPT,
+                    openvoice_repo=OPENVOICE,
+                    checkpoint_dir=checkpoint_dir,
+                    language=ov_lang,
+                    device=device,
+                    allow_partial=args.allow_partial,
+                )
+            elif engine == "qwen3-local":
+                if not QWEN3_BRIDGE_SCRIPT.is_file():
+                    return die(f"Qwen3 bridge script missing: {QWEN3_BRIDGE_SCRIPT}")
+                # Resolve model path: use local dir if it exists, else HF repo ID
+                model_path = args.qwen3_model
+                if QWEN3_LOCAL_MODEL.is_dir() and model_path == QWEN3_DEFAULT_MODEL:
+                    model_path = QWEN3_LOCAL_MODEL.as_posix()
+                return run_qwen3_bridge_direct(
+                    queue_tts=q_tts,
+                    manifest_path=openvoice_manifest_explicit,
+                    queue_path=openvoice_queue,
+                    work_dir=openvoice_work,
+                    logs_path=openvoice_logs,
+                    preserve_dir=generated_audio,
+                    bridge_script=QWEN3_BRIDGE_SCRIPT,
+                    model_path=model_path,
+                    language=args.target_language,
+                    temperature=args.qwen3_temperature,
+                    speed=args.qwen3_speed,
+                    allow_partial=args.allow_partial,
+                )
+            else:
+                return die(f"Unsupported TTS engine in split mode: {engine}")
+
+        bridge_result = _run_bridge(args.tts_engine, queue_tts)
         tts_engine_used = args.tts_engine
         fallback_attempted = False
 
-        # Handle fallback engine (only OpenVoice is supported in split mode;
-        # non-OpenVoice fallbacks are rejected at the entry point)
+        # Handle fallback engine (only engines with bridges are supported;
+        # others are rejected at the entry point)
         if bridge_result.returncode != 0 and args.fallback_tts_engine != "none":
             print(
                 f"Primary TTS engine '{args.tts_engine}' failed (exit "
@@ -967,21 +1064,7 @@ def main() -> int:
                 tts_type=fallback_provider_int,
                 language=args.target_language,
             )
-            bridge_result = run_openvoice_bridge_direct(
-                queue_tts=queue_tts,
-                manifest_path=openvoice_manifest_explicit,
-                queue_path=openvoice_queue,
-                work_dir=openvoice_work,
-                logs_path=openvoice_logs,
-                preserve_dir=generated_audio,
-                openvoice_python=openvoice_python,
-                bridge_script=bridge_script,
-                openvoice_repo=openvoice_repo,
-                checkpoint_dir=checkpoint_dir,
-                language=ov_lang,
-                device=device,
-                allow_partial=args.allow_partial,
-            )
+            bridge_result = _run_bridge(args.fallback_tts_engine, queue_tts)
             tts_engine_used = args.fallback_tts_engine
 
         # Wrap into a CompletedProcess-like result for downstream code

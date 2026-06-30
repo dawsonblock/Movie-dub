@@ -354,18 +354,19 @@ def _run_main_with_args(argv: list[str], tmp_path: Path) -> tuple[int, str]:
 
 
 def test_split_pipeline_rejects_qwen3_local(tmp_path):
-    """--tts-engine qwen3-local + --speaker-profiling must fail.
-
-    The split pipeline only supports OpenVoice for per-speaker ref_wav
-    routing. Accepting qwen3-local would silently run OpenVoice anyway,
-    which is a lie. This test proves the guard works.
-    """
+    """--tts-engine qwen3-local + --speaker-profiling is now SUPPORTED
+    since a real Qwen3-TTS bridge exists. This test verifies it is NOT
+    rejected by the engine guard (it may fail later for other reasons)."""
     rc, stderr = _run_main_with_args(
         ["--speaker-profiling", "--tts-engine", "qwen3-local"],
         tmp_path,
     )
-    assert rc != 0, "qwen3-local should be rejected in split mode"
-    assert "not supported" in stderr or "qwen3-local" in stderr
+    # rc may be non-zero from a later step (model not loaded, etc.), but
+    # the engine guard message must NOT be in stderr.
+    assert "not supported" not in stderr, (
+        f"qwen3-local should not be rejected by engine guard, but stderr "
+        f"says: {stderr}"
+    )
 
 
 def test_split_pipeline_rejects_omnivoice(tmp_path):
@@ -379,15 +380,16 @@ def test_split_pipeline_rejects_omnivoice(tmp_path):
 
 
 def test_split_pipeline_rejects_qwen3_fallback(tmp_path):
-    """--fallback-tts-engine qwen3-local + --speaker-profiling must fail."""
+    """--fallback-tts-engine omnivoice + --speaker-profiling must fail.
+    (qwen3-local is now supported as a fallback, so we test omnivoice.)"""
     rc, stderr = _run_main_with_args(
         ["--speaker-profiling",
          "--tts-engine", "openvoice",
-         "--fallback-tts-engine", "qwen3-local"],
+         "--fallback-tts-engine", "omnivoice"],
         tmp_path,
     )
-    assert rc != 0, "qwen3-local fallback should be rejected in split mode"
-    assert "not supported" in stderr or "qwen3-local" in stderr
+    assert rc != 0, "omnivoice fallback should be rejected in split mode"
+    assert "not supported" in stderr or "omnivoice" in stderr
 
 
 def test_split_pipeline_accepts_openvoice(tmp_path):
@@ -406,6 +408,21 @@ def test_split_pipeline_accepts_openvoice(tmp_path):
     )
 
 
+def test_split_pipeline_accepts_qwen3_local(tmp_path):
+    """--tts-engine qwen3-local + --speaker-profiling must NOT be rejected
+    by the engine guard now that a real Qwen3-TTS bridge exists."""
+    rc, stderr = _run_main_with_args(
+        ["--speaker-profiling", "--tts-engine", "qwen3-local"],
+        tmp_path,
+    )
+    # rc may be non-zero from a later step (model not loaded, etc.), but
+    # the engine guard message must NOT be in stderr.
+    assert "not supported" not in stderr, (
+        f"qwen3-local should not be rejected by engine guard, but stderr "
+        f"says: {stderr}"
+    )
+
+
 def test_vtv_pipeline_accepts_qwen3_local(tmp_path):
     """--tts-engine qwen3-local WITHOUT --speaker-profiling must NOT
     be rejected by the engine guard. The VTV pipeline supports all engines."""
@@ -419,3 +436,113 @@ def test_vtv_pipeline_accepts_qwen3_local(tmp_path):
         f"qwen3-local should not be rejected in VTV mode, but stderr "
         f"says: {stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Tests for Qwen3-TTS bridge utilities (bridge/qwen3_segment_tts.py)
+# ---------------------------------------------------------------------------
+
+QWEN3_BRIDGE = ROOT / "bridge" / "qwen3_segment_tts.py"
+
+# Load the bridge module for testing utility functions
+_qwen3_spec = importlib.util.spec_from_file_location("qwen3_segment_tts", QWEN3_BRIDGE)
+qwen3_bridge = importlib.util.module_from_spec(_qwen3_spec)
+_qwen3_spec.loader.exec_module(qwen3_bridge)
+
+
+def test_qwen3_bridge_normalize_language():
+    """Verify language code normalization for mlx-audio."""
+    assert qwen3_bridge.normalize_language("en") == "english"
+    assert qwen3_bridge.normalize_language("EN") == "english"
+    assert qwen3_bridge.normalize_language("en-US") == "english"
+    assert qwen3_bridge.normalize_language("zh") == "chinese"
+    assert qwen3_bridge.normalize_language("zh-cn") == "chinese"
+    assert qwen3_bridge.normalize_language("ja") == "japanese"
+    assert qwen3_bridge.normalize_language("ko") == "korean"
+    assert qwen3_bridge.normalize_language("fr") == "french"
+    assert qwen3_bridge.normalize_language("de") == "german"
+    assert qwen3_bridge.normalize_language("es") == "spanish"
+    assert qwen3_bridge.normalize_language("auto") == "auto"
+    assert qwen3_bridge.normalize_language(None) == "auto"
+    assert qwen3_bridge.normalize_language("") == "auto"
+    # Unknown code defaults to auto
+    assert qwen3_bridge.normalize_language("xx") == "auto"
+
+
+def test_qwen3_bridge_resolve_reference(tmp_path):
+    """Verify reference audio resolution."""
+    ref = tmp_path / "ref.wav"
+    ref.write_bytes(b"RIFF\x00")
+    item = {"role": "clone", "ref_wav": ref.as_posix()}
+    assert qwen3_bridge.resolve_reference(item, None) == ref.as_posix()
+
+    # Falls back to voice_reference
+    item2 = {"role": "clone", "voice_reference": ref.as_posix()}
+    assert qwen3_bridge.resolve_reference(item2, None) == ref.as_posix()
+
+    # Falls back to default_reference
+    assert qwen3_bridge.resolve_reference({}, ref.as_posix()) == ref.as_posix()
+
+    # Raises on missing file (role must be "clone" to use ref_wav)
+    with pytest.raises(FileNotFoundError):
+        qwen3_bridge.resolve_reference(
+            {"role": "clone", "ref_wav": "/nonexistent.wav"}, None
+        )
+
+    # Raises on no reference at all
+    with pytest.raises(ValueError):
+        qwen3_bridge.resolve_reference({}, None)
+
+
+def test_qwen3_bridge_return_code_for_counts():
+    """Verify return code logic matches OpenVoice bridge."""
+    assert qwen3_bridge.return_code_for_counts(5, 0, 0) == 0
+    assert qwen3_bridge.return_code_for_counts(5, 1, 0) == 2
+    assert qwen3_bridge.return_code_for_counts(5, 0, 1) == 2
+    assert qwen3_bridge.return_code_for_counts(0, 5, 0) == 3
+    assert qwen3_bridge.return_code_for_counts(0, 0, 5) == 3
+
+
+def test_qwen3_bridge_segment_times():
+    """Verify segment time parsing from queue items."""
+    item_ms = {"start_time": 1200, "end_time": 4800}
+    start, end = qwen3_bridge.segment_times_seconds(item_ms)
+    assert start == 1.2
+    assert end == 4.8
+
+    item_s = {"start": 1.5, "end": 3.5}
+    start, end = qwen3_bridge.segment_times_seconds(item_s)
+    assert start == 1.5
+    assert end == 3.5
+
+    start, end = qwen3_bridge.segment_times_seconds({})
+    assert start is None
+    assert end is None
+
+
+def test_qwen3_bridge_duration_status():
+    """Verify duration status classification."""
+    ratio, status = qwen3_bridge.duration_status(3.0, 3.0)
+    assert status == "accept"
+    assert abs(ratio - 1.0) < 0.01
+
+    ratio, status = qwen3_bridge.duration_status(4.0, 3.0)
+    assert status == "light_speedup_candidate"
+
+    ratio, status = qwen3_bridge.duration_status(5.0, 3.0)
+    assert status == "rewrite_shorter"
+
+    ratio, status = qwen3_bridge.duration_status(1.5, 3.0)
+    assert status == "padding_or_slowdown_candidate"
+
+    ratio, status = qwen3_bridge.duration_status(2.5, 3.0)
+    assert status == "minor_timing_mismatch"
+
+    ratio, status = qwen3_bridge.duration_status(None, 3.0)
+    assert status == "unknown"
+    assert ratio is None
+
+
+def test_qwen3_bridge_script_exists():
+    """Verify the Qwen3 bridge script exists."""
+    assert QWEN3_BRIDGE.is_file(), f"Qwen3 bridge script missing: {QWEN3_BRIDGE}"

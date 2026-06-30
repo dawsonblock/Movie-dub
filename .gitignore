@@ -3,10 +3,12 @@
 
 # Local Python environments and caches
 **/.venv/
+**/.venv-age/
 **/__pycache__/
 **/.pytest_cache/
 *.pyc
 .env
+.hf/
 
 # Generated smoke-test artifacts
 /openvoice-test.wav

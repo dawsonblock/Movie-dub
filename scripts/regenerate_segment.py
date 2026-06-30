@@ -16,6 +16,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 OPENVOICE = ROOT / "OpenVoice-main"
+PYVIDEOTRANS = ROOT / "pyvideotrans-main"
+
+# Bridge scripts per engine. The split pipeline supports openvoice + qwen3-local.
+BRIDGE_SCRIPTS = {
+    "openvoice": ROOT / "bridge" / "openvoice_segment_tts.py",
+    "qwen3-local": ROOT / "bridge" / "qwen3_segment_tts.py",
+}
+BRIDGE_VENVS = {
+    "openvoice": OPENVOICE / ".venv" / "bin" / "python",
+    "qwen3-local": PYVIDEOTRANS / ".venv" / "bin" / "python",
+}
+BRIDGE_CWDS = {
+    "openvoice": OPENVOICE,
+    "qwen3-local": ROOT,
+}
 
 
 def read_json(path: Path) -> dict | list:
@@ -35,12 +50,29 @@ def find_segment(review: list[dict], segment_id: str) -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Regenerate one OpenVoice segment from review_segments.json")
+    parser = argparse.ArgumentParser(description="Regenerate one segment from review_segments.json")
     parser.add_argument("--job", help="job directory containing review_segments.json (alias for --job-dir)")
     parser.add_argument("--job-dir", dest="job", help="job directory containing review_segments.json")
     parser.add_argument("--segment-id", required=True)
     parser.add_argument("--text", default="", help="replacement spoken text; otherwise edited_text/translated_text is used")
     parser.add_argument("--remux", action="store_true", help="rebuild dubbed audio and remux final video after regeneration")
+    # --- Review-loop enhancements (v0.12) ---
+    parser.add_argument("--tts-engine", choices=list(BRIDGE_SCRIPTS.keys()),
+                        default="openvoice",
+                        help="TTS bridge to use for regeneration (default: openvoice). "
+                             "Must match the engine used for the original dub.")
+    parser.add_argument("--change-speaker", default="",
+                        help="re-assign this segment to a different speaker_id "
+                             "(reads the new speaker's reference_audio from "
+                             "speakers/speaker_profiles.json)")
+    parser.add_argument("--change-reference", default="",
+                        help="use this WAV as the clone reference for this segment "
+                             "instead of the segment's current ref_wav")
+    parser.add_argument("--shorten", action="store_true",
+                        help="truncate the translated line to fit the segment "
+                             "duration at a rough speech rate before regenerating")
+    parser.add_argument("--qwen3-model", default="",
+                        help="Qwen3-TTS model path (only used with --tts-engine qwen3-local)")
     args = parser.parse_args()
 
     if not args.job:
@@ -60,6 +92,51 @@ def main() -> int:
         text = args.text or segment.get("edited_text") or segment.get("translated_text") or segment.get("text")
         if not text:
             raise RuntimeError("no text available for regeneration")
+
+        # --- Apply review-loop changes before building the queue ---
+        # 1. Change speaker: pull the new speaker's reference_audio from
+        #    speaker_profiles.json and update the segment's ref_wav + speaker_id.
+        if args.change_speaker:
+            profiles_path = job / "speakers" / "speaker_profiles.json"
+            if not profiles_path.is_file():
+                raise RuntimeError(
+                    f"--change-speaker requires speaker_profiles.json: {profiles_path}"
+                )
+            profiles = read_json(profiles_path)
+            by_id = {p["speaker_id"]: p for p in profiles.get("speakers", [])}
+            new_spk = by_id.get(args.change_speaker)
+            if not new_spk:
+                raise RuntimeError(
+                    f"speaker '{args.change_speaker}' not found in {profiles_path}. "
+                    f"Available: {', '.join(sorted(by_id))}"
+                )
+            segment["speaker_id"] = args.change_speaker
+            if new_spk.get("reference_audio"):
+                segment["ref_wav"] = new_spk["reference_audio"]
+            print(f"Changed segment {args.segment_id} -> speaker {args.change_speaker}")
+        # 2. Change reference: override ref_wav directly.
+        if args.change_reference:
+            ref_path = Path(args.change_reference).expanduser().resolve()
+            if not ref_path.is_file():
+                raise RuntimeError(f"--change-reference WAV not found: {ref_path}")
+            segment["ref_wav"] = ref_path.as_posix()
+            print(f"Changed segment {args.segment_id} reference -> {ref_path}")
+        # 3. Shorten: truncate the line to fit the segment duration.
+        if args.shorten:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from review_loop import shorten_text  # noqa: E402
+            start = float(segment.get("start", 0.0))
+            end = float(segment.get("end", 0.0))
+            dur = max(0.0, end - start)
+            if dur > 0:
+                new_text = shorten_text(text, dur)
+                if new_text != text:
+                    print(f"Shortened: {len(text)} -> {len(new_text)} chars")
+                    text = new_text
+        # Persist any speaker/reference/shorten edits back to review_segments.json
+        # so the change is durable across re-runs.
+        segment["edited_text"] = text
+        write_json(review_file, review)
 
         generated_dir = job / "generated_audio"
         safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(args.segment_id)).strip("_") or "segment"
@@ -85,21 +162,25 @@ def main() -> int:
         }
         write_json(queue_file, [segment_queue])
 
+        # --- Dispatch to the correct bridge for the chosen engine ---
+        engine = args.tts_engine
+        bridge_script = BRIDGE_SCRIPTS[engine]
+        bridge_python = BRIDGE_VENVS[engine]
+        bridge_cwd = BRIDGE_CWDS[engine]
+        if not bridge_script.is_file():
+            raise RuntimeError(f"bridge script not found for {engine}: {bridge_script}")
+        if not bridge_python.is_file():
+            raise RuntimeError(f"venv python not found for {engine}: {bridge_python}")
+
         cmd = [
-            (OPENVOICE / ".venv" / "bin" / "python").as_posix(),
-            (ROOT / "bridge" / "openvoice_segment_tts.py").as_posix(),
+            bridge_python.as_posix(),
+            bridge_script.as_posix(),
             "--queue-tts-file",
             queue_file.as_posix(),
             "--manifest-file",
             regen_manifest_file.as_posix(),
             "--work-dir",
             (job / "regenerate_work").as_posix(),
-            "--openvoice-repo",
-            OPENVOICE.as_posix(),
-            "--checkpoint-dir",
-            (OPENVOICE / "checkpoints_v2").as_posix(),
-            "--default-reference",
-            (ROOT / "voices" / "openvoice_default_reference.wav").as_posix(),
             "--language",
             segment.get("language", "EN"),
             "--device",
@@ -107,7 +188,18 @@ def main() -> int:
             "--preserve-dir",
             (job / "generated_audio").as_posix(),
         ]
-        result = subprocess.run(cmd, cwd=OPENVOICE, text=True, capture_output=True)
+        if engine == "openvoice":
+            cmd.extend([
+                "--openvoice-repo", OPENVOICE.as_posix(),
+                "--checkpoint-dir", (OPENVOICE / "checkpoints_v2").as_posix(),
+                "--default-reference",
+                (ROOT / "voices" / "openvoice_default_reference.wav").as_posix(),
+            ])
+        else:  # qwen3-local
+            model = args.qwen3_model or ""
+            if model:
+                cmd.extend(["--model", model])
+        result = subprocess.run(cmd, cwd=bridge_cwd, text=True, capture_output=True)
         if result.returncode != 0:
             raise RuntimeError(f"bridge exited with code {result.returncode}: {result.stderr[-1200:]}")
 

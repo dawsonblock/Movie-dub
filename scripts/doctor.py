@@ -396,6 +396,54 @@ def collect_checks(
               "not yet configured (run scripts/setup_omnivoice.sh)",
               required=False)
     )
+    # --- Age model plugin (v0.12) ---
+    # Optional: griko/age_reg_ann_ecapa_librosa_combined for real age
+    # regression. Falls back to the pitch heuristic when unavailable.
+    # Checks three things: .venv-age exists, local model dir exists, and the
+    # regressor loads. The plugin runs in its own venv, so the doctor (which
+    # runs under the bare system interpreter) only checks for the presence of
+    # the venv + model dir + a marker file written by setup_age_model.sh.
+    age_venv = ROOT / ".venv-age"
+    age_model_dir = ROOT / "models" / "age_reg_ann_ecapa_librosa_combined"
+    age_model_available = age_venv.is_dir() and age_model_dir.is_dir()
+    if age_model_available:
+        age_model_detail = (
+            f"ready (venv={age_venv.name}, model={age_model_dir.name})"
+        )
+    else:
+        parts = []
+        if not age_venv.is_dir():
+            parts.append(".venv-age missing")
+        if not age_model_dir.is_dir():
+            parts.append("model dir missing")
+        age_model_detail = (
+            f"{'; '.join(parts)} — run `make setup-age` "
+            "(pitch heuristic fallback otherwise)"
+        )
+    checks.append(
+        check("Speaker", "age regression venv + model", age_model_available,
+              age_model_detail, required=False)
+    )
+    # Also check the in-process plugin (only loads if age_regressor is
+    # importable from the current interpreter, which it usually isn't outside
+    # .venv-age). This is informational; the venv+model check above is the
+    # real readiness gate.
+    try:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from age_model import is_available as _age_available  # noqa: E402
+        from age_model import last_load_error as _age_err  # noqa: E402
+        in_proc = _age_available()
+        in_proc_detail = (
+            "loaded in current interpreter" if in_proc
+            else f"not importable here (use .venv-age): {_age_err()[:60] or 'n/a'}"
+        )
+    except Exception as exc:
+        in_proc = False
+        in_proc_detail = f"plugin check error: {exc}"
+    checks.append(
+        check("Speaker", "age regression plugin (in-process)", in_proc,
+              in_proc_detail, required=False)
+    )
     # Demucs cache presence (Blocker 8): warn if not cached so users know
     # Demucs will fall back to ffmpeg without --allow-demucs-download.
     demucs_cached = False

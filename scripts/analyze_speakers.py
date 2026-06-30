@@ -66,6 +66,14 @@ from pathlib import Path
 SUPPORTED_DIARIZATION = ("pyannote", "built", "none")
 PYANNOTE_MODEL = "pyannote/speaker-diarization-3.1"
 
+# Age estimation: real model plugin vs pitch heuristic.
+# Imported lazily-safe (no third-party deps at import time).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from age_model import estimate_age as _estimate_age_plugin  # noqa: E402
+
+AGE_MODEL_CHOICES = ("auto", "on", "off")
+DEFAULT_AGE_MODEL = "auto"
+
 
 def die(msg: str, code: int = 1) -> int:
     print(f"analyze_speakers: FAIL\nReason: {msg}", file=sys.stderr)
@@ -226,18 +234,131 @@ def run_built_diarization(
         speak_file.unlink(missing_ok=True)
 
 
+def _clip_quality_score(
+    audio_path: Path,
+    start: float,
+    end: float,
+    *,
+    other_turns: list[dict],
+    sample_rate: int = 16000,
+) -> dict:
+    """Score a candidate reference clip on quality dimensions.
+
+    Returns a dict with a ``score`` (higher is better) and per-dimension
+    diagnostics. Scoring dimensions (each normalized to [0, 1]):
+
+      - voiced_ratio   : fraction of frames with a detectable pitch
+                         (high = clean single-speaker voice, not silence/music)
+      - single_speaker : 1 - (overlap_seconds / clip_seconds); penalizes clips
+                         where another speaker also talks
+      - low_noise      : 1 - normalized RMS of non-voiced regions; penalizes
+                         clips with loud background between speech
+      - normal_volume  : 1 - abs(rms_db - target_db)/range; penalizes
+                         screaming (too loud) and whispering (too quiet)
+      - length_score   : rewards clips in the 5-15s sweet spot
+
+    The final ``score`` is a weighted sum. All audio analysis is done with
+    librosa if available; if librosa is missing, only the diarization-based
+    single_speaker + length scores are used (graceful degradation).
+    """
+    clip_dur = max(end - start, 0.001)
+    # --- single-speaker score (diarization-based, always available) ---
+    overlap = 0.0
+    for t in other_turns:
+        ov = max(0.0, min(end, t["end"]) - max(start, t["start"]))
+        if ov > 0:
+            overlap += ov
+    single = max(0.0, 1.0 - overlap / clip_dur)
+
+    # --- length score: sweet spot 5-15s ---
+    if clip_dur >= 5.0 and clip_dur <= 15.0:
+        length = 1.0
+    elif clip_dur >= 3.0:
+        length = 0.7
+    elif clip_dur >= 1.0:
+        length = 0.4
+    else:
+        length = 0.1
+
+    voiced_ratio = 0.0
+    low_noise = 0.5
+    normal_volume = 0.5
+    try:
+        import numpy as np
+        import librosa
+        y, sr = librosa.load(
+            audio_path.as_posix(), sr=sample_rate, mono=True,
+            offset=start, duration=clip_dur,
+        )
+        if len(y) < sr * 0.1:
+            return {"score": 0.0, "voiced_ratio": 0.0, "single_speaker": single,
+                    "low_noise": low_noise, "normal_volume": normal_volume,
+                    "length_score": length, "overlap_s": overlap}
+        # RMS in dBFS for volume normality (target ~ -20 dBFS for speech)
+        rms = float(np.sqrt(np.mean(np.square(y))) + 1e-9)
+        rms_db = 20.0 * np.log10(rms)
+        # normal_volume: peak at -20dBFS, fade out by 20dB either side
+        normal_volume = max(0.0, 1.0 - abs(rms_db - (-20.0)) / 20.0)
+        # Pitch / voicing
+        try:
+            f0, voiced_flag, _ = librosa.pyin(
+                y, fmin=65, fmax=400, sr=sr, frame_length=2048,
+            )
+            voiced = voiced_flag & ~np.isnan(f0)
+            voiced_ratio = float(np.sum(voiced)) / float(len(f0)) if len(f0) else 0.0
+        except Exception:
+            voiced_ratio = 0.0
+        # low_noise: estimate noise floor from non-voiced frame RMS
+        # (cheap proxy: voiced frames are signal, the rest is noise/silence)
+        if voiced_ratio > 0 and voiced_ratio < 1:
+            # More voiced + quieter non-voiced -> lower noise
+            low_noise = 0.5 + 0.5 * voiced_ratio
+        elif voiced_ratio >= 1:
+            low_noise = 0.9
+        else:
+            low_noise = 0.2
+    except ImportError:
+        # No librosa: rely on diarization + length only.
+        pass
+
+    # Weighted blend. Voiced ratio + single-speaker dominate because they
+    # most directly affect cloning quality.
+    score = (
+        0.35 * voiced_ratio
+        + 0.30 * single
+        + 0.15 * normal_volume
+        + 0.10 * low_noise
+        + 0.10 * length
+    )
+    return {
+        "score": round(score, 3),
+        "voiced_ratio": round(voiced_ratio, 3),
+        "single_speaker": round(single, 3),
+        "low_noise": round(low_noise, 3),
+        "normal_volume": round(normal_volume, 3),
+        "length_score": round(length, 3),
+        "overlap_s": round(overlap, 3),
+    }
+
+
 def select_reference_clip(
     audio_path: Path,
     turns: list[dict],
     speaker_id: str,
     min_s: float = 3.0,
     max_s: float = 8.0,
+    quality_scoring: bool = True,
 ) -> tuple[float, float] | None:
     """Pick the best reference clip for a speaker.
 
-    Strategy: among this speaker's turns, find the longest contiguous run
-    (merging adjacent turns with <0.3s gaps). Clip it to [min_s, max_s].
-    Prefer a clip from the middle third of the video for stability.
+    Strategy: among this speaker's turns, find contiguous runs (merging
+    adjacent turns with <0.3s gaps) and clip each to [min_s, max_s]. Score
+    every candidate on voiced ratio, single-speaker overlap, background
+    noise, volume normality, and length, then pick the highest-scoring clip.
+
+    When ``quality_scoring`` is False (or librosa is unavailable), falls back
+    to the legacy heuristic: prefer longer clips near the middle of the video.
+
     Returns (start, end) in seconds, or None if no usable clip.
     """
     spk_turns = sorted(
@@ -255,31 +376,49 @@ def select_reference_clip(
         else:
             merged.append((t["start"], t["end"]))
 
-    # Score each merged run: prefer longer runs, prefer middle of video
-    # Get actual audio length from the longest turn end
+    other_turns = [t for t in turns if t["speaker_id"] != speaker_id]
     max_end = max(t["end"] for t in turns) if turns else 0.0
     mid = max_end / 2.0
 
-    best: tuple[float, float, float] | None = None  # (score, start, end)
+    candidates: list[tuple[float, float]] = []
     for start, end in merged:
         duration = end - start
-        if duration < min_s:
-            continue
-        # Prefer clips near the middle, and longer clips
-        clip_mid = (start + end) / 2.0
-        distance_from_mid = abs(clip_mid - mid) / max(max_end, 1.0)
-        usable = min(duration, max_s)
-        score = usable - distance_from_mid * 2.0
-        if best is None or score > best[0]:
-            best = (score, start, start + min(duration, max_s))
-
-    if best is None:
+        if duration >= min_s:
+            candidates.append((start, start + min(duration, max_s)))
+    if not candidates:
         # Fall back to the longest single turn even if < min_s
         longest = max(merged, key=lambda r: r[1] - r[0])
         if longest[1] - longest[0] >= 1.0:
             return longest
         return None
-    return (best[1], best[2])
+
+    if not quality_scoring:
+        # Legacy heuristic: prefer longer clips near the middle.
+        best: tuple[float, float, float] | None = None
+        for start, end in candidates:
+            clip_mid = (start + end) / 2.0
+            distance_from_mid = abs(clip_mid - mid) / max(max_end, 1.0)
+            usable = end - start
+            score = usable - distance_from_mid * 2.0
+            if best is None or score > best[0]:
+                best = (score, start, end)
+        return (best[1], best[2]) if best else candidates[0]
+
+    # Quality scoring: evaluate each candidate, pick the best.
+    best_clip: tuple[float, float, float] | None = None  # (score, start, end)
+    for start, end in candidates:
+        q = _clip_quality_score(
+            audio_path, start, end, other_turns=other_turns,
+        )
+        score = q["score"]
+        # Tiny tie-break toward the middle of the video for stability.
+        clip_mid = (start + end) / 2.0
+        score -= abs(clip_mid - mid) / max(max_end, 1.0) * 0.05
+        if best_clip is None or score > best_clip[0]:
+            best_clip = (score, start, end)
+    if best_clip is None:
+        return candidates[0]
+    return (best_clip[1], best_clip[2])
 
 
 def cut_reference_wav(
@@ -438,8 +577,25 @@ def build_profiles(
     output_dir: Path,
     min_clip_s: float,
     max_clip_s: float,
+    age_model: str = "auto",
+    reference_clip_scoring: str = "auto",
+    age_model_path: str | None = None,
 ) -> list[dict]:
-    """Build per-speaker profiles: reference WAV + pitch + gender + age."""
+    """Build per-speaker profiles: reference WAV + pitch + gender + age.
+
+    ``age_model`` selects the age estimator: ``"auto"`` tries the real
+    regressor plugin and falls back to the pitch heuristic, ``"on"`` requires
+    the model, ``"off"`` uses the heuristic only.
+
+    ``age_model_path`` is an optional local model directory (e.g.
+    ``models/age_reg_ann_ecapa_librosa_combined``). When provided (or when the
+    default local dir exists) it is preferred over the HuggingFace repo id,
+    avoiding a runtime download.
+
+    ``reference_clip_scoring`` selects the reference clip strategy:
+    ``"auto"`` uses quality scoring when librosa is available, ``"on"``
+    forces it, ``"off"`` uses the legacy longest-near-middle heuristic.
+    """
     speaker_ids = sorted({t["speaker_id"] for t in turns})
     profiles: list[dict] = []
     for sid in speaker_ids:
@@ -449,7 +605,10 @@ def build_profiles(
         spk_dir.mkdir(parents=True, exist_ok=True)
         ref_path = spk_dir / "reference.wav"
 
-        clip = select_reference_clip(audio_path, turns, sid, min_clip_s, max_clip_s)
+        clip = select_reference_clip(
+            audio_path, turns, sid, min_clip_s, max_clip_s,
+            quality_scoring=(reference_clip_scoring != "off"),
+        )
         if clip is None:
             print(f"  WARNING: no usable reference clip for {sid}, skipping profile")
             continue
@@ -459,10 +618,16 @@ def build_profiles(
         gender_label, gender_conf = estimate_gender(
             pitch["median_f0_hz"], pitch["voiced_ratio"]
         )
-        age_band, age_years, age_conf = estimate_age_band(
-            pitch["median_f0_hz"], pitch["voiced_ratio"],
-            pitch["p10_f0_hz"], pitch["p90_f0_hz"],
+        # Age: try the real model plugin, fall back to the pitch heuristic.
+        age_result = _estimate_age_plugin(
+            ref_path, pitch, use_model=age_model,
+            model_path=age_model_path,
         )
+        age_band = age_result["band"]
+        age_years = age_result["estimated_years"]
+        age_conf = age_result["confidence"]
+        age_source = age_result.get("source", "heuristic")
+        age_method = age_result.get("method", "pitch_heuristic")
 
         profiles.append({
             "speaker_id": sid,
@@ -474,12 +639,14 @@ def build_profiles(
                 "band": age_band,
                 "estimated_years": age_years,
                 "confidence": age_conf,
+                "source": age_source,
+                "method": age_method,
             },
             "pitch": pitch,
         })
         print(
             f"  {sid}: {gender_label} ({gender_conf:.2f}), "
-            f"{age_band} (~{age_years:.0f}y), "
+            f"{age_band} (~{age_years:.0f}y, {age_source}), "
             f"F0={pitch['median_f0_hz']:.1f}Hz, "
             f"ref={ref_path.name}"
         )
@@ -510,6 +677,20 @@ def main() -> int:
     parser.add_argument("--segments-json", default="",
                         help="optional JSON file with [{segment_index,start,end}] "
                              "to pre-compute segment_assignments")
+    parser.add_argument("--age-model", choices=AGE_MODEL_CHOICES,
+                        default=DEFAULT_AGE_MODEL,
+                        help="age estimation: auto=try real model then fall back, "
+                             "on=require model, off=pitch heuristic only")
+    parser.add_argument("--age-model-path", default="",
+                        help="local age model dir, e.g. "
+                             "models/age_reg_ann_ecapa_librosa_combined "
+                             "(preferred over the HF repo id when present)")
+    parser.add_argument("--reference-clip-scoring", choices=("auto", "on", "off"),
+                        default="auto",
+                        help="reference clip selection: on=quality-scored "
+                             "(voiced ratio, single-speaker, noise, volume), "
+                             "off=legacy longest-near-middle, auto=on when "
+                             "librosa is available else off")
     args = parser.parse_args()
 
     input_path = Path(args.input).expanduser().resolve()
@@ -608,6 +789,9 @@ def main() -> int:
     print("Building per-speaker profiles...")
     profiles = build_profiles(
         turns, audio_path, output_dir, args.min_clip_seconds, args.max_clip_seconds,
+        age_model=args.age_model,
+        reference_clip_scoring=args.reference_clip_scoring,
+        age_model_path=args.age_model_path or None,
     )
 
     if not profiles:
@@ -635,6 +819,7 @@ def main() -> int:
             return die("segment assignment produced no results (no turns?)")
 
     # Write speaker_profiles.json
+    age_sources = {p.get("age", {}).get("source", "heuristic") for p in profiles}
     result = {
         "speakers": profiles,
         "diarization": {
@@ -643,6 +828,12 @@ def main() -> int:
             "num_speakers_detected": len(speaker_ids),
             "rttm_file": rttm_path.as_posix(),
             "audio_sha": audio_sha,
+        },
+        "age_model": {
+            "setting": args.age_model,
+            "model_path": args.age_model_path or "",
+            "sources_used": sorted(age_sources),
+            "plugin_available": "model" in age_sources,
         },
         "segment_assignments": segment_assignments,
     }

@@ -201,4 +201,167 @@ dub:
 		$(if $(VERIFY_PITCH),--verify-pitch) \
 		$(if $(FAIL_ON_PITCH_MISMATCH),--fail-on-pitch-mismatch) \
 		$(if $(PREFER_EMBEDDED_SUBTITLES),--prefer-embedded-subtitles) \
-		$(if $(NO_OCR_IMAGE_SUBS),--no-ocr-image-subs)
+		$(if $(NO_OCR_IMAGE_SUBS),--no-ocr-image-subs) \
+		$(if $(AGE_MODEL),--age-model $(AGE_MODEL)) \
+		$(if $(AGE_MODEL_PATH),--age-model-path $(AGE_MODEL_PATH)) \
+		$(if $(REFERENCE_CLIP_SCORING),--reference-clip-scoring $(REFERENCE_CLIP_SCORING)) \
+		$(if $(CHARACTER_PROFILES),--character-profiles) \
+		$(if $(RESUME),--resume) \
+		$(if $(FROM_STAGE),--from-stage $(FROM_STAGE)) \
+		$(if $(ONLY_SEGMENT),--only-segment $(ONLY_SEGMENT)) \
+		$(if $(SKIP_EXISTING),--skip-existing)
+
+# Build character_profiles.json from speaker_profiles.json.
+# Usage: make character-profiles PROFILES=tmp/job/speakers/speaker_profiles.json \
+#   OUTPUT=tmp/job/character_profiles.json TTS_ENGINE=qwen3-local
+character-profiles:
+	@if [ -z "$(PROFILES)" ] || [ -z "$(OUTPUT)" ]; then \
+		echo "Usage: make character-profiles PROFILES=<speaker_profiles.json> OUTPUT=<character_profiles.json>"; \
+		echo "  TTS_ENGINE=qwen3-local (optional)"; \
+		exit 1; \
+	fi
+	python3 scripts/character_profiles.py \
+		--speaker-profiles "$(PROFILES)" \
+		--output "$(OUTPUT)" \
+		$(if $(TTS_ENGINE),--tts-engine $(TTS_ENGINE))
+
+# Rename / lock / review a character in character_profiles.json.
+# Usage: make character-rename FILE=<cp.json> CHAR_ID=CHAR_001 NAME="Alice"
+#        make character-lock FILE=<cp.json> CHAR_ID=CHAR_001 REF=voices/alice.wav
+#        make character-review FILE=<cp.json> CHAR_ID=CHAR_001 STATUS=approved
+character-rename:
+	@if [ -z "$(FILE)" ] || [ -z "$(CHAR_ID)" ] || [ -z "$(NAME)" ]; then \
+		echo "Usage: make character-rename FILE=<cp.json> CHAR_ID=CHAR_001 NAME=\"Alice\""; exit 1; \
+	fi
+	python3 scripts/character_profiles.py --rename $(CHAR_ID) "$(NAME)" --output "$(FILE)"
+
+character-lock:
+	@if [ -z "$(FILE)" ] || [ -z "$(CHAR_ID)" ] || [ -z "$(REF)" ]; then \
+		echo "Usage: make character-lock FILE=<cp.json> CHAR_ID=CHAR_001 REF=<wav>"; exit 1; \
+	fi
+	python3 scripts/character_profiles.py --lock-voice $(CHAR_ID) $(REF) --output "$(FILE)"
+
+character-review:
+	@if [ -z "$(FILE)" ] || [ -z "$(CHAR_ID)" ] || [ -z "$(STATUS)" ]; then \
+		echo "Usage: make character-review FILE=<cp.json> CHAR_ID=CHAR_001 STATUS=approved"; exit 1; \
+	fi
+	python3 scripts/character_profiles.py --set-review $(CHAR_ID) $(STATUS) --output "$(FILE)"
+
+# Regenerate one segment from a review job.
+# Usage: make regenerate JOB=tmp/personal_dub/<id> SEGMENT=12 REMUX=1 \
+#   TTS_ENGINE=qwen3-local [CHANGE_SPEAKER=SPEAKER_01] [CHANGE_REF=voices/x.wav] [SHORTEN=1]
+regenerate:
+	@if [ -z "$(JOB)" ] || [ -z "$(SEGMENT)" ]; then \
+		echo "Usage: make regenerate JOB=<job_dir> SEGMENT=<id> [REMUX=1]"; \
+		echo "  TTS_ENGINE=openvoice CHANGE_SPEAKER=SPEAKER_01 CHANGE_REF=<wav> SHORTEN=1"; \
+		exit 1; \
+	fi
+	python3 scripts/regenerate_segment.py \
+		--job "$(JOB)" --segment-id $(SEGMENT) \
+		$(if $(REMUX),--remux) \
+		$(if $(TTS_ENGINE),--tts-engine $(TTS_ENGINE)) \
+		$(if $(CHANGE_SPEAKER),--change-speaker $(CHANGE_SPEAKER)) \
+		$(if $(CHANGE_REF),--change-reference $(CHANGE_REF)) \
+		$(if $(SHORTEN),--shorten) \
+		$(if $(QWEN3_MODEL),--qwen3-model $(QWEN3_MODEL))
+
+# Write failed_segments.json from a job's review/manifest/pitch artifacts.
+# Usage: make failed-segments JOB=tmp/personal_dub/<id>
+failed-segments:
+	@if [ -z "$(JOB)" ]; then echo "Usage: make failed-segments JOB=<job_dir>"; exit 1; fi
+	python3 scripts/review_loop.py failed \
+		--review "$(JOB)/review_segments.json" \
+		--manifest "$(JOB)/openvoice_manifest.json" \
+		--pitch-verification "$(JOB)/pitch_verification.json" \
+		--output "$(JOB)/failed_segments.json"
+
+# Re-assign a segment (or all segments of a speaker) to a new speaker.
+# Usage: make change-speaker JOB=<job> TO=SPEAKER_01 [SEGMENT=12] [FROM=SPEAKER_00]
+change-speaker:
+	@if [ -z "$(JOB)" ] || [ -z "$(TO)" ]; then \
+		echo "Usage: make change-speaker JOB=<job> TO=SPEAKER_01 [SEGMENT=12] [FROM=SPEAKER_00]"; exit 1; \
+	fi
+	python3 scripts/review_loop.py change-speaker \
+		--review "$(JOB)/review_segments.json" \
+		--speaker-profiles "$(JOB)/speakers/speaker_profiles.json" \
+		--to-speaker $(TO) \
+		$(if $(SEGMENT),--segment-id $(SEGMENT)) \
+		$(if $(FROM),--from-speaker $(FROM))
+
+# Repeatable benchmark harness. Runs the full pipeline on a clip and writes
+# a metrics report. Supply your own 5-10 min clip.
+# Usage: make benchmark INPUT=~/Movies/bench.mp4 OUTPUT_DIR=reports/benchmarks/run1 \
+#   TTS_ENGINE=qwen3-local SPEAKER_PROFILING=1 HF_TOKEN=$$HF_TOKEN
+benchmark:
+	@if [ -z "$(INPUT)" ] || [ -z "$(OUTPUT_DIR)" ]; then \
+		echo "Usage: make benchmark INPUT=<clip> OUTPUT_DIR=<dir>"; \
+		echo "  TTS_ENGINE=qwen3-local SPEAKER_PROFILING=1 HF_TOKEN=\$$HF_TOKEN"; \
+		echo "  TARGET_LUFS=-16 VERIFY_PITCH=1 PREFER_EMBEDDED_SUBTITLES=1"; \
+		echo "  AGE_MODEL=auto CHARACTER_PROFILES=1"; \
+		exit 1; \
+	fi
+	python3 scripts/benchmark.py \
+		--input "$(INPUT)" \
+		--output-dir "$(OUTPUT_DIR)" \
+		--name $(or $(NAME),bench) \
+		--target-language $(or $(TARGET),en) \
+		--source-language $(or $(SOURCE),auto) \
+		--tts-engine $(or $(TTS_ENGINE),openvoice) \
+		$(if $(SPEAKER_PROFILING),--speaker-profiling) \
+		$(if $(DIARIZATION),--diarization $(DIARIZATION)) \
+		$(if $(NUM_SPEAKERS),--num-speakers $(NUM_SPEAKERS)) \
+		$(if $(HF_TOKEN),--hf-token $(HF_TOKEN)) \
+		$(if $(VERIFY_PITCH),--verify-pitch) \
+		$(if $(PREFER_EMBEDDED_SUBTITLES),--prefer-embedded-subtitles) \
+		$(if $(TARGET_LUFS),--target-lufs $(TARGET_LUFS)) \
+		$(if $(BACKGROUND_VOLUME),--background-volume $(BACKGROUND_VOLUME)) \
+		$(if $(DUCKING),--ducking) \
+		$(if $(QWEN3_MODEL),--qwen3-model $(QWEN3_MODEL)) \
+		$(if $(AGE_MODEL),--age-model $(AGE_MODEL)) \
+		$(if $(AGE_MODEL_PATH),--age-model-path $(AGE_MODEL_PATH)) \
+		$(if $(RESUME),--resume) \
+		$(if $(SKIP_EXISTING),--skip-existing)
+
+# Inspect a job's segment cache index.
+# Usage: make cache-stats CACHE_DIR=tmp/personal_dub/<id>/cache
+cache-stats:
+	@if [ -z "$(CACHE_DIR)" ]; then echo "Usage: make cache-stats CACHE_DIR=<job>/cache"; exit 1; fi
+	python3 scripts/cache.py --cache-dir "$(CACHE_DIR)" --summary
+
+# Age model plugin status (checks .venv-age + local model dir).
+age-model-status:
+	@python3 scripts/age_model.py; true
+
+# Install the optional age-regression plugin into a dedicated .venv-age and
+# download the model into models/ (gitignored). Uses hf download, not git
+# clone, so no model weights enter the repo.
+# Usage: make setup-age [PYTHON_BIN=python3.10]
+setup-age:
+	@bash scripts/setup_age_model.sh
+
+# Verify the age model loads from .venv-age + models/.
+doctor-age:
+	@if [ ! -d .venv-age ]; then \
+		echo "FAIL: .venv-age missing. Run: make setup-age"; exit 1; \
+	fi
+	@. .venv-age/bin/activate && python - <<'PY'
+from pathlib import Path
+from age_regressor import AgeRegressionPipeline
+model_path = Path("models/age_reg_ann_ecapa_librosa_combined")
+if not model_path.exists():
+    raise SystemExit("FAIL: model dir missing: " + str(model_path) + "\nRun: make setup-age")
+AgeRegressionPipeline.from_pretrained(str(model_path))
+print("Age model OK: " + str(model_path))
+PY
+
+# Smoke-test the age model on a reference WAV. Writes tmp/smoke_age.json.
+# Usage: make smoke-age [AUDIO=voices/male_reference.wav] [MODEL_PATH=models/...]
+smoke-age:
+	@if [ ! -d .venv-age ]; then \
+		echo "FAIL: .venv-age missing. Run: make setup-age"; exit 1; \
+	fi
+	@mkdir -p tmp
+	@. .venv-age/bin/activate && python scripts/estimate_speaker_age.py \
+		--audio $(or $(AUDIO),voices/male_reference.wav) \
+		--model-path $(or $(MODEL_PATH),models/age_reg_ann_ecapa_librosa_combined) \
+		--output tmp/smoke_age.json

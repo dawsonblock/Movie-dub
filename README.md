@@ -434,6 +434,174 @@ configured output MP4 path. Keep the job directory if you want future
 segment repair. The canonical final video lives at
 `<job_dir>/final_dubbed.mp4` — the user output path is a synced copy.
 
+## v0.12: Quality, Caching, Review
+
+The biggest improvements are not more models — they are pipeline quality,
+caching, validation, and review tooling.
+
+### Real age model (optional plugin)
+
+Age estimation uses a real regressor when available and falls back to the
+pitch heuristic otherwise. The plugin is
+`griko/age_reg_ann_ecapa_librosa_combined` (SpeechBrain ECAPA-TDNN + ANN,
+~6.93y MAE). It runs in its own dedicated venv (`.venv-age`) and the model
+weights are downloaded into `models/` (gitignored) — never cloned into the
+repo.
+
+**Architecture:** the model runs only on clean per-speaker reference clips,
+never on the whole movie, background audio, mixed music/effects, overlapping
+dialogue, or TTS-generated audio.
+
+```bash
+# 1. Install the plugin + download the model (one-time)
+make setup-age
+# Optional: install git-xet first if Hugging Face requires it for large files
+#   brew install git-xet && git xet install
+
+# 2. Verify it loads
+make doctor-age
+
+# 3. Smoke-test on a reference WAV
+make smoke-age
+
+# 4. Check status from the bare interpreter
+make age-model-status
+
+# 5. Use it in a dub (auto = try model, fall back to heuristic)
+make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 SPEAKER_PROFILING=1 \
+     AGE_MODEL=auto AGE_MODEL_PATH=models/age_reg_ann_ecapa_librosa_combined
+```
+
+`--age-model on` requires the model and fails if unavailable; `off` uses the
+heuristic only; `auto` (default) tries the model and falls back silently.
+`--age-model-path` points at the local model dir (preferred over a runtime
+HuggingFace download). Each speaker profile records `age.source` (`model` or
+`heuristic`), `age.method` (`griko/age_reg_ann_ecapa_librosa_combined` or
+`pitch_heuristic`), and `age.note` (apparent vocal age caveat) so you know
+which estimate was used. `make doctor` reports venv + model-dir readiness as
+an optional check.
+
+The standalone wrapper (`scripts/estimate_speaker_age.py`) runs a single WAV
+through the model outside the pipeline:
+
+```bash
+source .venv-age/bin/activate
+python scripts/estimate_speaker_age.py \
+  --audio voices/male_reference.wav \
+  --model-path models/age_reg_ann_ecapa_librosa_combined \
+  --output tmp/age_test.json
+```
+
+### Character profiles
+
+`character_profiles.json` upgrades speaker profiles into named, reviewable
+characters with stable ids, locked voices, and per-segment membership.
+
+```bash
+# Generate alongside a dub
+make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 SPEAKER_PROFILING=1 CHARACTER_PROFILES=1
+
+# Or build from an existing speaker_profiles.json
+make character-profiles PROFILES=<job>/speakers/speaker_profiles.json \
+     OUTPUT=<job>/character_profiles.json TTS_ENGINE=qwen3-local
+
+# Rename, lock a voice, mark review status (idempotent — preserves edits)
+make character-rename FILE=<job>/character_profiles.json CHAR_ID=CHAR_001 NAME="Alice"
+make character-lock FILE=<job>/character_profiles.json CHAR_ID=CHAR_001 REF=voices/alice.wav
+make character-review FILE=<job>/character_profiles.json CHAR_ID=CHAR_001 STATUS=approved
+```
+
+Schema: `character_id`, `speaker_id`, `name`, `gender`, `age_band`,
+`estimated_years`, `median_f0_hz`, `voice_reference`, `voice_locked`,
+`segments[]`, `tts_engine`, `review_status`. Re-running the builder
+preserves user-set names, locks, and review status by matching on
+`speaker_id`.
+
+### Cache and resume
+
+Every stage is resumable. TTS segments are skipped when their output WAV
+already exists, so changing one line regenerates one line, not the whole
+movie.
+
+```bash
+# Resume the most recent job, skipping stages already marked pass
+make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 RESUME=1
+
+# Start at a specific stage (aliases: subs/stt/sts/profile/tts/audio/remux/verify)
+make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 FROM_STAGE=tts
+
+# Regenerate a single segment, then rebuild audio + remux
+make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 ONLY_SEGMENT=42
+
+# Skip any segment whose output WAV already exists (incremental)
+make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 SKIP_EXISTING=1
+```
+
+`--resume` reuses the most recent job dir (or `--job-dir`); `--from-stage`
+skips earlier stages; `--only-segment` runs TTS for one segment then
+rebuilds; `--skip-existing` drops segments with existing output WAVs and
+merges regenerated results back into the manifest.
+
+### Better reference clip selection
+
+Reference clips are now quality-scored on voiced ratio, single-speaker
+overlap, background noise, volume normality, and length (sweet spot 5–15s),
+instead of just "longest run near the middle." Falls back to the legacy
+heuristic when librosa is unavailable.
+
+```bash
+make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 SPEAKER_PROFILING=1 REFERENCE_CLIP_SCORING=on
+```
+
+### Segment review / regeneration loop
+
+After a dub, the job directory contains `review_segments.json`,
+`pitch_verification.json`, `speaker_profiles.json`, and
+`failed_segments.json`. You can then regenerate individual segments,
+re-assign speakers, swap reference clips, or shorten lines:
+
+```bash
+# List everything needing attention
+make failed-segments JOB=<job_dir>
+
+# Regenerate one segment with a different speaker's voice
+make regenerate JOB=<job_dir> SEGMENT=12 REMUX=1 \
+     TTS_ENGINE=qwen3-local CHANGE_SPEAKER=SPEAKER_01
+
+# Regenerate with a custom reference clip
+make regenerate JOB=<job_dir> SEGMENT=12 REMUX=1 CHANGE_REF=voices/alice.wav
+
+# Regenerate with a shortened line (truncates to fit the segment duration)
+make regenerate JOB=<job_dir> SEGMENT=12 REMUX=1 SHORTEN=1
+
+# Re-assign a whole speaker's segments to a new speaker, then regenerate
+make change-speaker JOB=<job_dir> FROM=SPEAKER_00 TO=SPEAKER_02
+```
+
+`regenerate_segment.py` now supports `--tts-engine qwen3-local` (not just
+OpenVoice), `--change-speaker`, `--change-reference`, and `--shorten`.
+
+### Benchmark harness
+
+A repeatable benchmark runs the full pipeline on a clip and records a
+metrics report. Supply your own 5–10 minute clip and judge every change
+against it.
+
+```bash
+make benchmark INPUT=~/Movies/bench_clip.mp4 \
+     OUTPUT_DIR=reports/benchmarks/run1 \
+     TTS_ENGINE=qwen3-local SPEAKER_PROFILING=1 HF_TOKEN=$HF_TOKEN \
+     VERIFY_PITCH=1 PREFER_EMBEDDED_SUBTITLES=1 TARGET_LUFS=-16 \
+     AGE_MODEL=auto CHARACTER_PROFILES=1
+```
+
+Tracked metrics: total render time, per-stage times, TTS time per segment
+(mean/p50/p90/max), segment success rate, timing drift, loudness mismatch,
+failed segments, bad speaker assignments, bad age/gender guesses, speaker
+F0 consistency, review-required count, final MP4 duration delta, and a
+composite quality score (0–100). The report is written to
+`<OUTPUT_DIR>/benchmark_report.json`.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |

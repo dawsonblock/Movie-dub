@@ -57,6 +57,16 @@ from job_state import (
     update_job_stage,
     write_job_state,
 )
+from cache import (
+    ResumePlan,
+    parse_from_stage,
+)
+from character_profiles import (
+    build_character_profiles as _build_character_profiles,
+    load_character_profiles as _load_character_profiles,
+    write_character_profiles as _write_character_profiles,
+)
+from review_loop import write_failed_segments as _write_failed_segments
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -624,6 +634,36 @@ def main() -> int:
                         help="flag segments with voiced_ratio below this")
     parser.add_argument("--duration-ratio-threshold", type=float, default=1.35,
                         help="flag rewrite_shorter if gen/target duration exceeds this")
+    # --- Age model plugin (v0.12) ---
+    parser.add_argument("--age-model", choices=("auto", "on", "off"),
+                        default="auto",
+                        help="age estimation: auto=try real model then fall back, "
+                             "on=require model, off=pitch heuristic only")
+    parser.add_argument("--age-model-path", default="",
+                        help="local age model dir, e.g. "
+                             "models/age_reg_ann_ecapa_librosa_combined "
+                             "(preferred over the HF repo id when present)")
+    parser.add_argument("--reference-clip-scoring", choices=("auto", "on", "off"),
+                        default="auto",
+                        help="reference clip selection: on=quality-scored, "
+                             "off=legacy, auto=on when librosa available")
+    # --- Character profiles (v0.12) ---
+    parser.add_argument("--character-profiles", action="store_true",
+                        help="also write character_profiles.json alongside "
+                             "speaker_profiles.json (named, reviewable characters)")
+    # --- Cache / resume (v0.12) ---
+    parser.add_argument("--resume", action="store_true",
+                        help="resume an existing job: reuse its job dir and skip "
+                             "stages already marked pass in job.json")
+    parser.add_argument("--from-stage", default="",
+                        help="start at a given stage (subs/stt/sts/profile/tts/"
+                             "audio/remux/verify). Implies skipping earlier stages.")
+    parser.add_argument("--only-segment", default="",
+                        help="only (re)generate a single segment id; then rebuild "
+                             "audio + remux. Implies --from-stage tts.")
+    parser.add_argument("--skip-existing", action="store_true",
+                        help="skip TTS segments whose output WAV already exists "
+                             "(incremental regeneration)")
     args = parser.parse_args()
 
     input_video = Path(args.input).expanduser().resolve()
@@ -735,19 +775,61 @@ def main() -> int:
             )
 
     # --- Set up job dir (safe deletion policy: Blocker 3) ---
-    job_id = generate_job_id()
-    if args.job_dir:
-        job_dir = Path(args.job_dir).expanduser().resolve()
-    else:
-        job_dir = PERSONAL_DUB_ROOT / job_id
-    try:
-        create_job_dir(
-            job_dir,
-            force=args.force_overwrite_job_dir,
-            allow_external=args.allow_external_job_dir_delete,
+    # --resume: reuse an existing job dir + job.json instead of creating a
+    # fresh one. The job dir must already exist and have a job.json.
+    resume_plan: ResumePlan | None = None
+    if args.resume or args.from_stage or args.only_segment:
+        candidate = Path(args.job_dir).expanduser().resolve() if args.job_dir else None
+        if candidate and candidate.is_dir() and (candidate / "job.json").is_file():
+            job_dir = candidate
+        elif args.job_dir:
+            return die(
+                f"--resume/--from-stage/--only-segment requires an existing "
+                f"job dir with job.json: {candidate}"
+            )
+        else:
+            # No --job-dir given: pick the most recent job dir.
+            pdub = PERSONAL_DUB_ROOT
+            job_dirs = sorted(
+                [d for d in pdub.glob("*") if d.is_dir() and (d / "job.json").is_file()],
+                key=lambda d: d.stat().st_mtime, reverse=True,
+            )
+            if not job_dirs:
+                return die(
+                    "--resume/--from-stage/--only-segment requires an existing "
+                    f"job dir under {pdub}; none found."
+                )
+            job_dir = job_dirs[0]
+            print(f"Resume: reusing most recent job dir {job_dir}")
+        # Load existing job.json to build the resume plan.
+        existing_state = read_job_state(job_dir / "job.json") or {}
+        try:
+            from_stage = parse_from_stage(args.from_stage) if args.from_stage else None
+        except ValueError as exc:
+            return die(str(exc))
+        resume_plan = ResumePlan(
+            existing_state.get("stages", {}),
+            resume=args.resume,
+            from_stage=from_stage,
+            only_segment=args.only_segment or None,
+            skip_existing=args.skip_existing,
         )
-    except UnsafeJobDirError as exc:
-        return die(str(exc))
+        job_id = existing_state.get("job_id", "resumed")
+        print(f"Resume plan: {resume_plan.summary()}")
+    else:
+        job_id = generate_job_id()
+        if args.job_dir:
+            job_dir = Path(args.job_dir).expanduser().resolve()
+        else:
+            job_dir = PERSONAL_DUB_ROOT / job_id
+        try:
+            create_job_dir(
+                job_dir,
+                force=args.force_overwrite_job_dir,
+                allow_external=args.allow_external_job_dir_delete,
+            )
+        except UnsafeJobDirError as exc:
+            return die(str(exc))
     output_dir = job_dir / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
     generated_audio = job_dir / "generated_audio"
@@ -778,6 +860,8 @@ def main() -> int:
     speaker_profiles_path = speakers_dir / "speaker_profiles.json"
     pitch_verification_path = job_dir / "pitch_verification.json"
     enriched_manifest_path = job_dir / "openvoice_manifest_enriched.json"
+    # Character profiles output (v0.12)
+    character_profiles_path = job_dir / "character_profiles.json"
 
     # --- Speaker profiling setup (v0.9: split pipeline) ---
     # When --speaker-profiling is on, we use a SPLIT pipeline:
@@ -893,6 +977,19 @@ def main() -> int:
     # ====================================================================
     srt_file: Path | None = None
     if use_split_pipeline:
+        # --- Resume: decide which early stages to skip ---
+        # When --from-stage / --resume is set, reuse existing artifacts for
+        # any stage the plan says to skip, instead of re-running STT/STS/
+        # diarization. Each skipped stage requires its artifact to exist.
+        def _stage_skipped(stage: str) -> bool:
+            return resume_plan is not None and not resume_plan.should_run_stage(stage)
+
+        skip_subs = _stage_skipped("subtitle_extraction")
+        skip_sts = _stage_skipped("translation")
+        skip_profile = _stage_skipped("speaker_profiling")
+        # STT (transcription) is implicitly skipped when source_srt is reused
+        # above, since the STT step only runs when source_srt is None.
+
         # --- Step 0: embedded subtitles (text + timing source) ---
         # Embedded subtitles give WHAT was said and WHEN. They never carry
         # speaker identity — WHO comes from diarization in Step 3. When
@@ -902,7 +999,12 @@ def main() -> int:
         # disabled), fall through to whisper ASR below.
         source_srt: Path | None = None
         subtitle_source_note = "asr"
-        if args.prefer_embedded_subtitles:
+        # Resume: reuse an already-extracted source SRT if present.
+        if skip_subs and (subtitles_dir / "source.srt").is_file():
+            source_srt = subtitles_dir / "source.srt"
+            subtitle_source_note = "reused"
+            print(f"Resume: reusing source SRT {source_srt}")
+        elif args.prefer_embedded_subtitles:
             update_job_stage(job_json_path, "subtitle_extraction", "running")
             try:
                 sub_result = _extract_embedded_subtitles(
@@ -991,42 +1093,48 @@ def main() -> int:
             print(f"Source SRT (embedded): {source_srt}")
 
         # --- Step 2: STS (subtitle translation) → translated SRT ---
-        update_job_stage(job_json_path, "translation", "running")
-        sts_output = job_dir / "sts_output"
-        sts_output.mkdir(parents=True, exist_ok=True)
-        sts_cmd = [
-            py_python.as_posix(), "cli.py",
-            "--task", "sts",
-            "--name", source_srt.as_posix(),
-            "--translate_type", "0",
-            "--source_language_code", args.source_language,
-            "--target_language_code", args.target_language,
-            "--output-dir", sts_output.as_posix(),
-            "--no-clear-cache",
-            "--verbose",
-        ]
-        sts_result = run_subprocess(sts_cmd, PYVIDEOTRANS, "sts", env=pyvt_env)
-        if sts_result.returncode != 0:
-            update_job_stage(job_json_path, "translation", "fail")
-            return die(f"STS failed: {sts_result.stderr[-1500:]}")
-        # Find the translated SRT
-        # STS names it {stem}.{target_language_code}.srt where
-        # target_language_code is the raw value we passed (e.g. "zh-cn").
-        # Try the raw code first, then the normalized (no hyphen) version.
-        translated_srt = sts_output / f"{source_srt.stem}.{args.target_language}.srt"
-        if not translated_srt.is_file():
-            lang_code = args.target_language.lower().replace("-", "")
-            translated_srt = sts_output / f"{source_srt.stem}.{lang_code}.srt"
-        if not translated_srt.is_file():
-            srts = list(sts_output.glob("*.srt"))
-            if not srts:
+        if skip_sts and job_srt.is_file():
+            # Resume: reuse the existing translated SRT.
+            srt_file = job_srt
+            print(f"Resume: reusing translated SRT {job_srt}")
+            update_job_stage(job_json_path, "translation", "pass")
+        else:
+            update_job_stage(job_json_path, "translation", "running")
+            sts_output = job_dir / "sts_output"
+            sts_output.mkdir(parents=True, exist_ok=True)
+            sts_cmd = [
+                py_python.as_posix(), "cli.py",
+                "--task", "sts",
+                "--name", source_srt.as_posix(),
+                "--translate_type", "0",
+                "--source_language_code", args.source_language,
+                "--target_language_code", args.target_language,
+                "--output-dir", sts_output.as_posix(),
+                "--no-clear-cache",
+                "--verbose",
+            ]
+            sts_result = run_subprocess(sts_cmd, PYVIDEOTRANS, "sts", env=pyvt_env)
+            if sts_result.returncode != 0:
                 update_job_stage(job_json_path, "translation", "fail")
-                return die(f"STS produced no SRT in {sts_output}")
-            translated_srt = srts[0]
-        shutil.copy2(translated_srt, job_srt)
-        srt_file = job_srt
-        print(f"Translated SRT: {translated_srt}")
-        update_job_stage(job_json_path, "translation", "pass")
+                return die(f"STS failed: {sts_result.stderr[-1500:]}")
+            # Find the translated SRT
+            # STS names it {stem}.{target_language_code}.srt where
+            # target_language_code is the raw value we passed (e.g. "zh-cn").
+            # Try the raw code first, then the normalized (no hyphen) version.
+            translated_srt = sts_output / f"{source_srt.stem}.{args.target_language}.srt"
+            if not translated_srt.is_file():
+                lang_code = args.target_language.lower().replace("-", "")
+                translated_srt = sts_output / f"{source_srt.stem}.{lang_code}.srt"
+            if not translated_srt.is_file():
+                srts = list(sts_output.glob("*.srt"))
+                if not srts:
+                    update_job_stage(job_json_path, "translation", "fail")
+                    return die(f"STS produced no SRT in {sts_output}")
+                translated_srt = srts[0]
+            shutil.copy2(translated_srt, job_srt)
+            srt_file = job_srt
+            print(f"Translated SRT: {translated_srt}")
+            update_job_stage(job_json_path, "translation", "pass")
 
         # --- Step 2b: validate source/translated segment-count alignment ---
         # Speaker assignments from analyze_speakers are indexed by
@@ -1054,7 +1162,11 @@ def main() -> int:
         # --- Step 3: analyze_speakers with real segment timings ---
         # Parse the source SRT to get segments with real start/end times,
         # then run diarization + profiling with those segments.
-        if not args.speaker_profile_json:
+        # Resume: skip diarization when the plan says to and profiles exist.
+        if skip_profile and speaker_profiles_path.is_file() and not args.speaker_profile_json:
+            print(f"Resume: reusing speaker profiles {speaker_profiles_path}")
+            update_job_stage(job_json_path, "speaker_profiling", "pass")
+        elif not args.speaker_profile_json:
             if not ANALYZE_SPEAKERS_SCRIPT.is_file():
                 return die(f"analyze_speakers.py missing: {ANALYZE_SPEAKERS_SCRIPT}")
             segments = parse_srt_to_segments(source_srt)
@@ -1076,7 +1188,11 @@ def main() -> int:
                 "--min-clip-seconds", str(args.min_clip_seconds),
                 "--max-clip-seconds", str(args.max_clip_seconds),
                 "--segments-json", segments_json_path.as_posix(),
+                "--age-model", args.age_model,
+                "--reference-clip-scoring", args.reference_clip_scoring,
             ]
+            if args.age_model_path:
+                analyze_cmd.extend(["--age-model-path", args.age_model_path])
             if args.hf_token:
                 analyze_cmd.extend(["--hf-token", args.hf_token])
             analyze_result = run_subprocess(
@@ -1127,6 +1243,26 @@ def main() -> int:
                 f"F0={p.get('median_f0_hz',0):.1f}Hz"
             )
 
+        # --- Build character_profiles.json (v0.12) ---
+        # Upgrade speaker profiles to named, reviewable characters. Idempotent:
+        # preserves user edits (names, voice locks, review_status) across runs.
+        character_profiles_path = job_dir / "character_profiles.json"
+        if args.character_profiles:
+            existing_cp = _load_character_profiles(character_profiles_path)
+            cp_data = _build_character_profiles(
+                speaker_profiles_data,
+                tts_engine=args.tts_engine,
+                existing=existing_cp,
+            )
+            _write_character_profiles(
+                character_profiles_path, cp_data,
+                source=speaker_profiles_path.as_posix(),
+            )
+            job_state["paths"]["character_profiles"] = character_profiles_path.as_posix()
+            write_job_state(job_json_path, job_state)
+            print(f"Character profiles: {character_profiles_path} "
+                  f"({len(cp_data['characters'])} characters)")
+
         # --- Step 4: Build queue_tts with per-speaker ref_wav ---
         update_job_stage(job_json_path, "tts", "running")
         # Compute the pyVideoTrans cache folder for output WAV paths
@@ -1151,6 +1287,39 @@ def main() -> int:
             update_job_stage(job_json_path, "tts", "fail")
             return die("no TTS queue items built from translated SRT + speaker profiles")
         print(f"Built {len(queue_tts)} TTS queue items with per-speaker ref_wav")
+
+        # --- Cache / resume: filter the queue to segments that need (re)gen ---
+        # --skip-existing drops segments whose output WAV already exists.
+        # --only-segment keeps just one segment id.
+        # Filtered-out segments are not sent to the bridge; their existing
+        # manifest entries are preserved and merged back after the run.
+        full_queue = queue_tts
+        existing_manifest_for_merge: dict | None = None
+        if openvoice_manifest_explicit.is_file():
+            try:
+                existing_manifest_for_merge = read_json(openvoice_manifest_explicit)
+            except Exception:
+                existing_manifest_for_merge = None
+
+        def _queue_filter(q_item: dict) -> bool:
+            seg_id = str(q_item.get("line", q_item.get("id", "")))
+            if args.only_segment and seg_id != str(args.only_segment):
+                return False
+            if args.skip_existing:
+                out = Path(q_item.get("filename", ""))
+                if out.is_file() and out.stat().st_size > 0:
+                    return False
+            return True
+
+        queue_tts = [item for item in full_queue if _queue_filter(item)]
+        skipped_count = len(full_queue) - len(queue_tts)
+        if skipped_count > 0:
+            print(f"Skipping {skipped_count} segment(s) with existing output "
+                  f"(--skip-existing / --only-segment)")
+        if not queue_tts and existing_manifest_for_merge:
+            # Nothing to regenerate; reuse the existing manifest as-is.
+            print("All segments already generated; reusing existing manifest.")
+            update_job_stage(job_json_path, "tts", "pass")
 
         # --- Step 5: Run TTS bridge directly ---
         # Dispatch to the correct bridge based on the selected engine.
@@ -1231,7 +1400,15 @@ def main() -> int:
             else:
                 return _fail(f"Unsupported TTS engine in split mode: {engine}")
 
-        bridge_result = _run_bridge(args.tts_engine, queue_tts)
+        # --- Run the bridge (skip if everything was cached) ---
+        if queue_tts:
+            bridge_result = _run_bridge(args.tts_engine, queue_tts)
+        else:
+            # All segments skipped; synthesize a successful no-op result so
+            # downstream code treats the existing manifest as the output.
+            bridge_result = subprocess.CompletedProcess(
+                args=["_cached"], returncode=0, stdout="", stderr="",
+            )
         tts_engine_used = args.tts_engine
         fallback_attempted = False
 
@@ -1244,7 +1421,8 @@ def main() -> int:
                 f"'{args.fallback_tts_engine}'..."
             )
             fallback_attempted = True
-            # Rebuild queue with fallback provider
+            # Rebuild queue with fallback provider (full queue; fallback
+            # should attempt every segment that was originally requested)
             fallback_provider_int = int(TTS_ENGINE_MAP[args.fallback_tts_engine])
             queue_tts = build_queue_tts_with_speakers(
                 translated_srt=job_srt,
@@ -1265,6 +1443,51 @@ def main() -> int:
         if not openvoice_manifest_explicit.is_file():
             update_job_stage(job_json_path, "tts", "fail")
             return die(f"TTS manifest not found: {openvoice_manifest_explicit}")
+
+        # --- Merge regenerated results with existing manifest entries ---
+        # When --skip-existing / --only-segment filtered the queue, the bridge
+        # only produced results for the regenerated subset. Merge them back
+        # into the full manifest so downstream audio build sees every segment.
+        if existing_manifest_for_merge and skipped_count > 0:
+            try:
+                new_manifest = read_json(openvoice_manifest_explicit)
+                old_by_id = {
+                    str(r.get("id", r.get("index", ""))): r
+                    for r in existing_manifest_for_merge.get("results", [])
+                }
+                merged_results = []
+                seen_ids: set[str] = set()
+                # Preserve order from the full queue; use new result if present,
+                # else the old (cached) result.
+                new_by_id = {
+                    str(r.get("id", r.get("index", ""))): r
+                    for r in new_manifest.get("results", [])
+                }
+                for q_item in full_queue:
+                    sid = str(q_item.get("line", q_item.get("id", "")))
+                    if sid in new_by_id:
+                        merged_results.append(new_by_id[sid])
+                        seen_ids.add(sid)
+                    elif sid in old_by_id:
+                        merged_results.append(old_by_id[sid])
+                        seen_ids.add(sid)
+                # Append any results not in the queue (defensive)
+                for r in new_manifest.get("results", []):
+                    rid = str(r.get("id", r.get("index", "")))
+                    if rid not in seen_ids:
+                        merged_results.append(r)
+                        seen_ids.add(rid)
+                new_manifest["results"] = merged_results
+                new_manifest["segments"] = merged_results
+                new_manifest["ok"] = sum(1 for r in merged_results if r.get("status") == "ok")
+                new_manifest["error"] = sum(1 for r in merged_results if r.get("status") == "error")
+                new_manifest["skipped"] = sum(1 for r in merged_results if r.get("status") == "skipped_empty_text")
+                new_manifest["skipped_empty_text"] = new_manifest["skipped"]
+                write_json(openvoice_manifest_explicit, new_manifest)
+                print(f"Merged manifest: {len(merged_results)} segments "
+                      f"({skipped_count} cached + {len(new_by_id)} regenerated)")
+            except Exception as exc:
+                print(f"WARNING: manifest merge failed: {exc}", file=sys.stderr)
         # Validate the manifest has at least one successful segment. A
         # bridge can exit 0 with an empty manifest or all-failed results;
         # without this check, downstream build_dubbed_audio would produce
@@ -1728,9 +1951,27 @@ def main() -> int:
             report["speaker_profiles"] = speaker_profiles_path.as_posix()
             report["speakers_detected"] = len(speaker_profiles_data.get("speakers", []))
             report["enriched_manifest"] = enriched_manifest_path.as_posix()
+            # Age model provenance (v0.12)
+            am = speaker_profiles_data.get("age_model", {})
+            if am:
+                report["age_model"] = am
+        if character_profiles_path.is_file():
+            report["character_profiles"] = character_profiles_path.as_posix()
         if pitch_verification is not None:
             report["pitch_verification"] = pitch_verification_path.as_posix()
             report["pitch_verification_summary"] = pitch_verification.get("summary", {})
+        # --- Write failed_segments.json (v0.12 review loop) ---
+        failed_segments_path = job_dir / "failed_segments.json"
+        try:
+            failed = _write_failed_segments(
+                review_path, stable_manifest,
+                pitch_verification_path if pitch_verification_path.is_file() else None,
+                failed_segments_path,
+            )
+            report["failed_segments"] = failed_segments_path.as_posix()
+            report["failed_segment_count"] = failed.get("failed_count", 0)
+        except Exception as exc:
+            print(f"WARNING: failed_segments.json write failed: {exc}", file=sys.stderr)
         # Merge warnings from the build audio report if present
         if build_audio_report.is_file():
             try:

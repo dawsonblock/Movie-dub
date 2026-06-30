@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Run the Movie-dub test suite from any directory.
+# Usage: bin/test [--verbose|-v]
+#
+# Auto-discovers the repo root from the script location, checks that
+# pytest is installed, and runs the test suite.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$ROOT_DIR"
+
+# Check pytest
+if ! python3 -c "import pytest" 2>/dev/null; then
+    echo "ERROR: pytest is not installed for $(python3 --version 2>&1)." >&2
+    echo "  Fix:  make setup-dev" >&2
+    echo "  Or:   python3 -m pip install pytest" >&2
+    exit 1
+fi
+
+echo "Running tests with $(python3 --version 2>&1) from $(pwd)..."
+echo
+
+if [[ "${1:-}" == "--verbose" || "${1:-}" == "-v" ]]; then
+    exec python3 -m pytest tests/ -v --tb=short
+else
+    exec python3 -m pytest tests/ -q
+fi

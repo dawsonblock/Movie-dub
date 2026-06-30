@@ -126,6 +126,32 @@ make test-pyvt
 
 The OpenVoice provider is registered in pyVideoTrans as provider `34`, displayed as `OpenVoice V2(Local)`.
 
+## Unit Tests
+
+The `tests/` directory contains 215 pytest tests for the v0.12 modules (age
+model, cache/resume, character profiles, review loop, benchmark, CLI wiring).
+They run in ~2s and need no model dependencies.
+
+```bash
+# One-time: install pytest + ruff
+make setup-dev
+
+# Run the suite (from the repo root)
+make test
+
+# Verbose output
+make test-verbose
+
+# Or from any directory:
+bin/test
+bin/test --verbose
+```
+
+If `make test` fails with "pytest is not installed", run `make setup-dev`
+first. The `.python-version` file pins the repo to Python 3.12.0 via pyenv;
+if you use a different version, make sure pytest is installed for it
+(`python3 -m pip install pytest`).
+
 ## Dub Your Own Video
 
 After `make doctor` passes and the smoke tests are green, dub a personal clip.

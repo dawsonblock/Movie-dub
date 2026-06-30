@@ -1,4 +1,4 @@
-.PHONY: doctor doctor-strict doctor-demucs doctor-checkpoints doctor-qwen3 setup-ffmpeg setup-pyvt setup-openvoice setup-qwen3 setup-checkpoints download-openvoice smoke-openvoice smoke-qwen3 smoke-e2e test test-unit test-openvoice test-pyvt dub proof proof-report generate-voices analyze-speakers verify-pitch clean
+.PHONY: doctor doctor-strict doctor-demucs doctor-checkpoints doctor-qwen3 setup-ffmpeg setup-pyvt setup-openvoice setup-qwen3 setup-checkpoints download-openvoice smoke-openvoice smoke-qwen3 smoke-e2e test test-unit test-verbose setup-dev test-openvoice test-pyvt dub proof proof-report generate-voices analyze-speakers verify-pitch clean
 
 doctor:
 	python3 scripts/doctor.py
@@ -103,11 +103,31 @@ smoke-qwen3:
 smoke-e2e:
 	python3 scripts/smoke_e2e_short_clip.py
 
+# Install dev dependencies (pytest, ruff) into the current interpreter.
+setup-dev:
+	python3 -m pip install -r requirements-dev.txt
+
 # Run the full pytest unit test suite (tests/ dir). Fast — no model deps.
+# Checks that pytest is installed first and gives a helpful error if not.
 test: test-unit
 
 test-unit:
+	@python3 -c "import pytest" 2>/dev/null || { \
+		echo "ERROR: pytest is not installed for $$(python3 --version 2>&1)."; \
+		echo "  Fix: make setup-dev"; \
+		echo "  Or:  python3 -m pip install pytest"; \
+		exit 1; \
+	}
+	@echo "Running tests with $$(python3 --version 2>&1) from $$(pwd)..."
 	python3 -m pytest tests/ -q
+
+test-verbose:
+	@python3 -c "import pytest" 2>/dev/null || { \
+		echo "ERROR: pytest is not installed for $$(python3 --version 2>&1)."; \
+		echo "  Fix: make setup-dev"; \
+		exit 1; \
+	}
+	python3 -m pytest tests/ -v --tb=short
 
 test-openvoice:
 	cd pyvideotrans-main && .venv/bin/python -m pytest tests/test_openvoice_bridge.py -q

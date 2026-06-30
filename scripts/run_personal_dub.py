@@ -28,6 +28,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -197,6 +198,112 @@ def latest_artifact(root: Path, start_time: float, pattern: str) -> Path | None:
     return max(candidates, key=lambda p: p.stat().st_mtime) if candidates else None
 
 
+def parse_srt_to_segments(srt_path: Path) -> list[dict]:
+    """Parse an SRT file into a list of segment dicts with timings.
+
+    Returns: [{"segment_index": 0, "start": 1.2, "end": 4.8, "text": "..."}, ...]
+    Times are in seconds (float). segment_index is 0-based.
+    """
+    import re as _re
+    text = srt_path.read_text(encoding="utf-8-sig")
+    segments: list[dict] = []
+    # SRT blocks: index line, time line, text lines, blank line
+    blocks = _re.split(r"\n\s*\n", text.strip())
+    for idx, block in enumerate(blocks):
+        lines = block.strip().split("\n")
+        if len(lines) < 2:
+            continue
+        # Find the time line (contains -->)
+        time_line = next((l for l in lines if "-->" in l), None)
+        if not time_line:
+            continue
+        m = _re.match(
+            r"(\d+):(\d+):(\d+)[,\.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,\.](\d+)",
+            time_line.strip(),
+        )
+        if not m:
+            continue
+        h1, m1, s1, ms1, h2, m2, s2, ms2 = (int(x) for x in m.groups())
+        start = h1 * 3600 + m1 * 60 + s1 + ms1 / 1000.0
+        end = h2 * 3600 + m2 * 60 + s2 + ms2 / 1000.0
+        # Text is everything after the time line
+        text_lines = lines[lines.index(time_line) + 1:]
+        seg_text = " ".join(l.strip() for l in text_lines if l.strip())
+        segments.append({
+            "segment_index": idx,
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "text": seg_text,
+        })
+    return segments
+
+
+def build_queue_tts_with_speakers(
+    translated_srt: Path,
+    speaker_profiles: dict,
+    cache_folder: Path,
+    tts_type: int = 34,
+    voice_rate: str = "+0%",
+    volume: str = "+0%",
+    pitch: str = "+0Hz",
+) -> list[dict]:
+    """Build a queue_tts list with per-speaker ref_wav from speaker profiles.
+
+    Each queue item gets:
+      - line: 1-based line number
+      - text: translated text
+      - role: "clone" (so OpenVoice provider knows to use ref_wav)
+      - ref_wav: path to the speaker's reference.wav
+      - start_time / end_time: in milliseconds (pyVideoTrans convention)
+      - filename: output WAV path in cache_folder
+      - tts_type, rate, volume, pitch
+    """
+    segments = parse_srt_to_segments(translated_srt)
+    seg_assignments = speaker_profiles.get("segment_assignments", [])
+    profiles_by_id = {
+        p["speaker_id"]: p for p in speaker_profiles.get("speakers", [])
+    }
+    # Build segment_index -> speaker_id map
+    seg_to_speaker: dict[int, str] = {}
+    for sa in seg_assignments:
+        seg_to_speaker[sa.get("segment_index", 0)] = sa.get("speaker_id", "")
+
+    queue: list[dict] = []
+    for seg in segments:
+        idx = seg["segment_index"]
+        speaker_id = seg_to_speaker.get(idx, "")
+        profile = profiles_by_id.get(speaker_id, {})
+        ref_wav = profile.get("reference_audio", "")
+        if not ref_wav or not Path(ref_wav).is_file():
+            raise RuntimeError(
+                f"segment {idx}: speaker '{speaker_id}' has no reference_audio "
+                f"file at {ref_wav}"
+            )
+        text = seg["text"]
+        voice = "clone"
+        _key = hashlib.md5(
+            f"en-{text}-{voice}-{voice_rate}-{volume}-{pitch}-{tts_type}".encode()
+        ).hexdigest()
+        start_ms = int(seg["start"] * 1000)
+        end_ms = int(seg["end"] * 1000)
+        queue.append({
+            "line": idx + 1,
+            "text": text,
+            "role": voice,
+            "ref_wav": ref_wav,
+            "voice_reference": ref_wav,
+            "start_time": start_ms,
+            "end_time": end_ms,
+            "rate": voice_rate,
+            "volume": volume,
+            "pitch": pitch,
+            "tts_type": tts_type,
+            "filename": f"{cache_folder}/dubb-{idx}-{_key}.wav",
+            "openvoice_output": f"{cache_folder}/dubb-{idx}-{_key}.wav-openvoice.wav",
+        })
+    return queue
+
+
 def latest_manifest(start_time: float) -> Path | None:
     return latest_artifact(PYVIDEOTRANS / "tmp", start_time, "**/openvoice-manifest-*.json")
 
@@ -220,6 +327,55 @@ def run_subprocess(cmd: list[str], cwd: Path, label: str,
     if result.stderr:
         print(result.stderr, file=sys.stderr)
     return result
+
+
+def run_openvoice_bridge_direct(
+    queue_tts: list[dict],
+    manifest_path: Path,
+    queue_path: Path,
+    work_dir: Path,
+    logs_path: Path,
+    preserve_dir: Path,
+    openvoice_python: Path,
+    bridge_script: Path,
+    openvoice_repo: Path,
+    checkpoint_dir: Path,
+    language: str = "EN",
+    device: str = "auto",
+    allow_partial: bool = False,
+) -> subprocess.CompletedProcess:
+    """Run the OpenVoice bridge directly with a pre-built queue_tts.
+
+    This bypasses pyVideoTrans's TTS layer entirely, giving us full control
+    over per-speaker ref_wav routing. Each queue item must have a 'ref_wav'
+    or 'voice_reference' key pointing to the speaker's reference.wav.
+    """
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+    queue_path.write_text(
+        json.dumps(queue_tts, ensure_ascii=False), encoding="utf-8",
+    )
+    work_dir.mkdir(parents=True, exist_ok=True)
+    preserve_dir.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        openvoice_python.as_posix(),
+        bridge_script.as_posix(),
+        "--queue-tts-file", queue_path.as_posix(),
+        "--manifest-file", manifest_path.as_posix(),
+        "--work-dir", work_dir.as_posix(),
+        "--openvoice-repo", openvoice_repo.as_posix(),
+        "--checkpoint-dir", checkpoint_dir.as_posix(),
+        "--language", language,
+        "--logs-file", logs_path.as_posix(),
+        "--preserve-dir", preserve_dir.as_posix(),
+    ]
+    if device:
+        cmd.extend(["--device", device])
+    env = dict(os.environ)
+    env["PYTHONPATH"] = (
+        openvoice_repo.as_posix() + os.pathsep + env.get("PYTHONPATH", "")
+    )
+    return run_subprocess(cmd, openvoice_repo, "openvoice-bridge-direct", env=env)
 
 
 def main() -> int:
@@ -460,12 +616,23 @@ def main() -> int:
     pitch_verification_path = job_dir / "pitch_verification.json"
     enriched_manifest_path = job_dir / "openvoice_manifest_enriched.json"
 
-    # --- Speaker profiling (v0.8: Blocker 1, 2, 3) ---
-    # If --speaker-profiling is on, run analyze_speakers.py to produce
-    # per-speaker reference WAVs + speaker_profiles.json. If a profile is
-    # already provided via --speaker-profile-json, copy it in.
+    # --- Speaker profiling setup (v0.9: split pipeline) ---
+    # When --speaker-profiling is on, we use a SPLIT pipeline:
+    #   1. STT (cli.py --task stt) → source SRT with real segment timings
+    #   2. STS (cli.py --task sts) → translated SRT
+    #   3. analyze_speakers.py --segments-json → speaker_profiles.json with
+    #      real segment_assignments (matched to actual SRT timings)
+    #   4. Direct OpenVoice bridge with per-speaker ref_wav
+    #   5. Build dubbed audio + remux (existing code)
+    #
+    # When --speaker-profiling is off, we use the original VTV pipeline.
+    #
+    # If a profile is already provided via --speaker-profile-json, we still
+    # need the source SRT to validate segment_assignments. If the profile has
+    # no segment_assignments, we fail hard (v0.9: no more fake progress).
     speaker_profiles_data: dict | None = None
-    if args.speaker_profiling or args.speaker_profile_json:
+    use_split_pipeline = bool(args.speaker_profiling or args.speaker_profile_json)
+    if use_split_pipeline:
         speakers_dir.mkdir(parents=True, exist_ok=True)
         if args.speaker_profile_json:
             src_profile = Path(args.speaker_profile_json).expanduser().resolve()
@@ -473,47 +640,6 @@ def main() -> int:
                 return die(f"speaker profile JSON not found: {src_profile}")
             shutil.copy2(src_profile, speaker_profiles_path)
             print(f"Speaker profiles (reused): {speaker_profiles_path}")
-        else:
-            if not ANALYZE_SPEAKERS_SCRIPT.is_file():
-                return die(f"analyze_speakers.py missing: {ANALYZE_SPEAKERS_SCRIPT}")
-            print("Running speaker profiling...")
-            analyze_cmd = [
-                py_python.as_posix(),
-                ANALYZE_SPEAKERS_SCRIPT.as_posix(),
-                "--input", input_video.as_posix(),
-                "--output-dir", speakers_dir.as_posix(),
-                "--diarization", args.speaker_diarization,
-                "--num-speakers", args.num_speakers,
-                "--min-clip-seconds", str(args.min_clip_seconds),
-                "--max-clip-seconds", str(args.max_clip_seconds),
-            ]
-            if args.hf_token:
-                analyze_cmd.extend(["--hf-token", args.hf_token])
-            analyze_result = run_subprocess(
-                analyze_cmd, ROOT, "analyze-speakers",
-            )
-            if analyze_result.returncode != 0 or not speaker_profiles_path.is_file():
-                return die(
-                    f"speaker profiling failed: "
-                    f"{analyze_result.stderr[-1500:]}"
-                )
-        try:
-            speaker_profiles_data = read_json(speaker_profiles_path)
-        except Exception as exc:
-            return die(f"failed to read speaker_profiles.json: {exc}")
-        speakers = speaker_profiles_data.get("speakers", [])
-        if not speakers:
-            return die("speaker profiling produced no speakers")
-        print(f"  {len(speakers)} speaker(s) profiled")
-        for spk in speakers:
-            g = spk.get("gender", {})
-            a = spk.get("age", {})
-            p = spk.get("pitch", {})
-            print(
-                f"  {spk['speaker_id']}: {g.get('label','?')} "
-                f"({g.get('confidence',0):.2f}), {a.get('band','?')}, "
-                f"F0={p.get('median_f0_hz',0):.1f}Hz"
-            )
 
     # --- Initialize job.json (Blocker 12) ---
     job_state = initial_job_state(
@@ -557,156 +683,366 @@ def main() -> int:
     print(f"Target:   {args.target_language}")
     print(f"Job dir:  {job_dir}")
 
-    # --- Configure OpenVoice settings in pyVideoTrans (Blocker 4) ---
-    # Set the reference voice + preserve dir so segment WAVs survive for rebuild.
-    # Track the original state of every key we touch so we can restore exactly.
-    # If cfg.json does not exist, create it. Never restore missing keys as
-    # empty strings — remove them instead.
-    PYVT_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-    if PYVT_CONFIG.is_file():
-        try:
-            cfg = read_json(PYVT_CONFIG)
-        except Exception:
-            cfg = {}
-    else:
-        cfg = {}
-    # Track original key state: {key: {"existed": bool, "value": any}}
-    cfg_original: dict[str, dict] = {}
-    cfg_tracked_keys = (
-        "openvoice_default_reference",
-        PRESERVE_KEY,
-        "openvoice_queue_file",
-        "openvoice_manifest_file",
-        "openvoice_logs_file",
-        "openvoice_work_dir",
-        "openvoice_allow_partial",
-        "line_roles",
-        "speaker_type",
-        "hf_token",
-        "enable_diariz",
-    )
-    for key in cfg_tracked_keys:
-        cfg_original[key] = {
-            "existed": key in cfg,
-            "value": cfg.get(key),
-        }
-    cfg["openvoice_default_reference"] = reference.as_posix()
-    cfg[PRESERVE_KEY] = generated_audio.as_posix()
-    cfg["openvoice_queue_file"] = openvoice_queue.as_posix()
-    cfg["openvoice_manifest_file"] = openvoice_manifest_explicit.as_posix()
-    cfg["openvoice_logs_file"] = openvoice_logs.as_posix()
-    cfg["openvoice_work_dir"] = openvoice_work.as_posix()
-    cfg["openvoice_allow_partial"] = bool(args.allow_partial)
-    # When speaker profiling is active, we pre-computed speaker assignments.
-    # We do NOT want pyVideoTrans to re-diarize; we inject line_roles so each
-    # segment uses the "clone" role and gets routed to the right reference.
-    if speaker_profiles_data:
-        # line_roles maps segment line number (1-based string) -> role name.
-        # We use "clone" for all segments so pyVideoTrans cuts/uses per-segment
-        # ref_wav. The per-speaker reference routing is handled by pre-placing
-        # clone-{i}.wav files in the cache folder (see below).
-        segment_assignments = speaker_profiles_data.get("segment_assignments", [])
-        line_roles: dict[str, str] = {}
-        for sa in segment_assignments:
-            seg_idx = sa.get("segment_index", 0)
-            line_roles[str(seg_idx + 1)] = "clone"
-        if line_roles:
-            cfg["line_roles"] = line_roles
-        # Disable pyVideoTrans's own diarization since we pre-computed
-        cfg["enable_diariz"] = False
-    write_json(PYVT_CONFIG, cfg)
-    # Log the active config for debugging
-    print(f"Active config: reference={reference.as_posix()} "
-          f"preserve_dir={generated_audio.as_posix()} "
-          f"cfg_path={PYVT_CONFIG.as_posix()}")
-
     # --- Determine ASR provider type ---
-    # HuggingFace ASR (recogn_type=4) for transformer-based models like
-    # whisper-large-v3-turbo; faster-whisper (recogn_type=0) for tiny/base/etc.
     if args.recogn_type:
         recogn_type = args.recogn_type
     elif "/" in args.model or args.model.startswith("whisper-large"):
-        # HuggingFace model path (e.g. openai/whisper-large-v3-turbo)
         recogn_type = HUGGINGFACE_ASR_PROVIDER
     else:
         recogn_type = "0"  # faster-whisper
 
-    # --- Run pyVideoTrans VTV with selected TTS engine ---
-    # Map --tts-engine to the pyVideoTrans provider index. Falls back to the
-    # configured fallback engine if the primary fails (Blocker 4).
-    tts_provider = TTS_ENGINE_MAP[args.tts_engine]
-    fallback_provider = (
-        TTS_ENGINE_MAP[args.fallback_tts_engine]
-        if args.fallback_tts_engine != "none"
-        else None
-    )
-
-    def build_pyvt_cmd(provider: str) -> list[str]:
-        return [
-            py_python.as_posix(), "cli.py",
-            "--task", "vtv",
-            "--name", input_video.as_posix(),
-            "--recogn_type", recogn_type,
-            "--model_name", args.model,
-            "--source_language_code", args.source_language,
-            "--target_language_code", args.target_language,
-            "--tts_type", provider,
-            "--voice_role", "default",
-            "--subtitle_type", args.subtitle_type,
-            "--output-dir", output_dir.as_posix(),
-            "--no-clear-cache",
-            "--verbose",
-        ]
-
     # Build environment for subprocess
     pyvt_env = dict(os.environ)
     if args.cpu_only:
-        # Force CPU by disabling MPS
         pyvt_env["PYTORCH_MPS_DISABLE"] = "1"
         pyvt_env["CUDA_VISIBLE_DEVICES"] = ""
-    update_job_stage(job_json_path, "transcription", "running")
-    update_job_stage(job_json_path, "translation", "running")
-    update_job_stage(job_json_path, "tts", "running")
-    started = time.time()
-    cmd = build_pyvt_cmd(tts_provider)
-    tts_engine_used = args.tts_engine
-    fallback_attempted = False
-    try:
-        result = run_subprocess(cmd, PYVIDEOTRANS, "pyVideoTrans", env=pyvt_env)
-        # Fallback engine retry (Blocker 4): if the primary engine fails and a
-        # fallback is configured, re-run with the fallback provider. We only
-        # retry on hard failures (nonzero exit), not on partial success.
-        if result.returncode != 0 and fallback_provider and fallback_provider != tts_provider:
+
+    # ====================================================================
+    # SPLIT PIPELINE (when --speaker-profiling is active)
+    # ====================================================================
+    # STT → STS → analyze_speakers(with real timings) → direct OpenVoice bridge
+    # This bypasses pyVideoTrans's TTS layer entirely for per-speaker routing.
+    # ====================================================================
+    if use_split_pipeline:
+        # --- Step 1: STT (speech-to-text) → source SRT ---
+        update_job_stage(job_json_path, "transcription", "running")
+        stt_output = job_dir / "stt_output"
+        stt_output.mkdir(parents=True, exist_ok=True)
+        stt_cmd = [
+            py_python.as_posix(), "cli.py",
+            "--task", "stt",
+            "--name", input_video.as_posix(),
+            "--recogn_type", recogn_type,
+            "--model_name", args.model,
+            "--detect_language", args.source_language,
+            "--output-dir", stt_output.as_posix(),
+            "--no-clear-cache",
+            "--verbose",
+        ]
+        stt_result = run_subprocess(stt_cmd, PYVIDEOTRANS, "stt", env=pyvt_env)
+        if stt_result.returncode != 0:
+            update_job_stage(job_json_path, "transcription", "fail")
+            return die(f"STT failed: {stt_result.stderr[-1500:]}")
+        # Find the source SRT in stt_output
+        source_srt = stt_output / f"{input_video.stem}.srt"
+        if not source_srt.is_file():
+            # Fallback: scan for any SRT
+            srts = list(stt_output.glob("*.srt"))
+            if not srts:
+                update_job_stage(job_json_path, "transcription", "fail")
+                return die(f"STT produced no SRT in {stt_output}")
+            source_srt = srts[0]
+        shutil.copy2(source_srt, subtitles_dir / "source.srt")
+        print(f"Source SRT: {source_srt}")
+        update_job_stage(job_json_path, "transcription", "pass")
+
+        # --- Step 2: STS (subtitle translation) → translated SRT ---
+        update_job_stage(job_json_path, "translation", "running")
+        sts_output = job_dir / "sts_output"
+        sts_output.mkdir(parents=True, exist_ok=True)
+        sts_cmd = [
+            py_python.as_posix(), "cli.py",
+            "--task", "sts",
+            "--name", source_srt.as_posix(),
+            "--translate_type", "0",
+            "--source_language_code", args.source_language,
+            "--target_language_code", args.target_language,
+            "--output-dir", sts_output.as_posix(),
+            "--no-clear-cache",
+            "--verbose",
+        ]
+        sts_result = run_subprocess(sts_cmd, PYVIDEOTRANS, "sts", env=pyvt_env)
+        if sts_result.returncode != 0:
+            update_job_stage(job_json_path, "translation", "fail")
+            return die(f"STS failed: {sts_result.stderr[-1500:]}")
+        # Find the translated SRT
+        lang_code = args.target_language.lower().replace("-", "")
+        translated_srt = sts_output / f"{source_srt.stem}.{lang_code}.srt"
+        if not translated_srt.is_file():
+            srts = list(sts_output.glob("*.srt"))
+            if not srts:
+                update_job_stage(job_json_path, "translation", "fail")
+                return die(f"STS produced no SRT in {sts_output}")
+            translated_srt = srts[0]
+        shutil.copy2(translated_srt, job_srt)
+        srt_file = job_srt
+        print(f"Translated SRT: {translated_srt}")
+        update_job_stage(job_json_path, "translation", "pass")
+
+        # --- Step 3: analyze_speakers with real segment timings ---
+        # Parse the source SRT to get segments with real start/end times,
+        # then run diarization + profiling with those segments.
+        if not args.speaker_profile_json:
+            if not ANALYZE_SPEAKERS_SCRIPT.is_file():
+                return die(f"analyze_speakers.py missing: {ANALYZE_SPEAKERS_SCRIPT}")
+            segments = parse_srt_to_segments(source_srt)
+            if not segments:
+                return die(f"source SRT has no segments: {source_srt}")
+            segments_json_path = speakers_dir / "segments.json"
+            segments_json_path.write_text(
+                json.dumps(segments, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            print(f"Running speaker profiling with {len(segments)} segments...")
+            analyze_cmd = [
+                py_python.as_posix(),
+                ANALYZE_SPEAKERS_SCRIPT.as_posix(),
+                "--input", input_video.as_posix(),
+                "--output-dir", speakers_dir.as_posix(),
+                "--diarization", args.speaker_diarization,
+                "--num-speakers", args.num_speakers,
+                "--min-clip-seconds", str(args.min_clip_seconds),
+                "--max-clip-seconds", str(args.max_clip_seconds),
+                "--segments-json", segments_json_path.as_posix(),
+            ]
+            if args.hf_token:
+                analyze_cmd.extend(["--hf-token", args.hf_token])
+            analyze_result = run_subprocess(
+                analyze_cmd, ROOT, "analyze-speakers",
+            )
+            if analyze_result.returncode != 0 or not speaker_profiles_path.is_file():
+                return die(
+                    f"speaker profiling failed: "
+                    f"{analyze_result.stderr[-1500:]}"
+                )
+        # Load and validate speaker profiles
+        try:
+            speaker_profiles_data = read_json(speaker_profiles_path)
+        except Exception as exc:
+            return die(f"failed to read speaker_profiles.json: {exc}")
+        speakers = speaker_profiles_data.get("speakers", [])
+        if not speakers:
+            return die("speaker profiling produced no speakers")
+        # v0.9: segment_assignments is MANDATORY. No more fake progress.
+        segment_assignments = speaker_profiles_data.get("segment_assignments", [])
+        if not segment_assignments:
+            return die(
+                "speaker_profiles.json has no segment_assignments. "
+                "This means speaker profiling ran without real segment "
+                "timings. Re-run without --speaker-profile-json or ensure "
+                "the profile was generated with --segments-json."
+            )
+        print(f"  {len(speakers)} speaker(s) profiled, "
+              f"{len(segment_assignments)} segment assignments")
+        for spk in speakers:
+            g = spk.get("gender", {})
+            a = spk.get("age", {})
+            p = spk.get("pitch", {})
+            print(
+                f"  {spk['speaker_id']}: {g.get('label','?')} "
+                f"({g.get('confidence',0):.2f}), {a.get('band','?')}, "
+                f"F0={p.get('median_f0_hz',0):.1f}Hz"
+            )
+
+        # --- Step 4: Build queue_tts with per-speaker ref_wav ---
+        update_job_stage(job_json_path, "tts", "running")
+        # Compute the pyVideoTrans cache folder for output WAV paths
+        try:
+            import hashlib as _hashlib
+            stat = input_video.stat()
+            uuid_input = f"{input_video.as_posix()}-{stat.st_size}-{stat.st_mtime}"
+            pyvt_uuid = _hashlib.md5(uuid_input.encode()).hexdigest()[:10]
+            cache_folder = PYVIDEOTRANS / "tmp" / pyvt_uuid
+        except Exception:
+            cache_folder = job_dir / "tts_cache"
+        cache_folder.mkdir(parents=True, exist_ok=True)
+
+        tts_provider_int = int(TTS_ENGINE_MAP[args.tts_engine])
+        queue_tts = build_queue_tts_with_speakers(
+            translated_srt=job_srt,
+            speaker_profiles=speaker_profiles_data,
+            cache_folder=cache_folder,
+            tts_type=tts_provider_int,
+        )
+        if not queue_tts:
+            update_job_stage(job_json_path, "tts", "fail")
+            return die("no TTS queue items built from translated SRT + speaker profiles")
+        print(f"Built {len(queue_tts)} TTS queue items with per-speaker ref_wav")
+
+        # --- Step 5: Run OpenVoice bridge directly ---
+        openvoice_python = OPENVOICE / ".venv" / "bin" / "python"
+        bridge_script = ROOT / "bridge" / "openvoice_segment_tts.py"
+        openvoice_repo = OPENVOICE
+        checkpoint_dir = OPENVOICE / "checkpoints_v2"
+        if not openvoice_python.is_file():
+            return die(f"OpenVoice venv python missing: {openvoice_python}")
+        if not bridge_script.is_file():
+            return die(f"OpenVoice bridge script missing: {bridge_script}")
+        if not (checkpoint_dir / "converter" / "checkpoint.pth").is_file():
+            return die(f"OpenVoice checkpoints missing: {checkpoint_dir}")
+
+        # Normalize language for OpenVoice
+        ov_lang = args.target_language.upper()
+        if ov_lang.startswith("ZH"):
+            ov_lang = "ZH"
+        elif ov_lang.startswith("EN"):
+            ov_lang = "EN"
+
+        device = "cpu" if args.cpu_only else "auto"
+        started = time.time()
+        bridge_result = run_openvoice_bridge_direct(
+            queue_tts=queue_tts,
+            manifest_path=openvoice_manifest_explicit,
+            queue_path=openvoice_queue,
+            work_dir=openvoice_work,
+            logs_path=openvoice_logs,
+            preserve_dir=generated_audio,
+            openvoice_python=openvoice_python,
+            bridge_script=bridge_script,
+            openvoice_repo=openvoice_repo,
+            checkpoint_dir=checkpoint_dir,
+            language=ov_lang,
+            device=device,
+            allow_partial=args.allow_partial,
+        )
+        tts_engine_used = args.tts_engine
+        fallback_attempted = False
+
+        # Handle fallback engine
+        if bridge_result.returncode != 0 and args.fallback_tts_engine != "none":
+            fallback_provider_int = int(TTS_ENGINE_MAP[args.fallback_tts_engine])
             print(
                 f"Primary TTS engine '{args.tts_engine}' failed (exit "
-                f"{result.returncode}). Retrying with fallback "
+                f"{bridge_result.returncode}). Retrying with fallback "
                 f"'{args.fallback_tts_engine}'..."
             )
             fallback_attempted = True
-            # Re-write cfg with the fallback engine's default reference if needed.
-            # The OpenVoice-specific keys only matter for provider 34; for other
-            # engines they are ignored by pyVideoTrans.
-            fallback_cmd = build_pyvt_cmd(fallback_provider)
-            result = run_subprocess(
-                fallback_cmd, PYVIDEOTRANS, "pyVideoTrans-fallback", env=pyvt_env,
+            # Rebuild queue with fallback provider
+            queue_tts = build_queue_tts_with_speakers(
+                translated_srt=job_srt,
+                speaker_profiles=speaker_profiles_data,
+                cache_folder=cache_folder,
+                tts_type=fallback_provider_int,
+            )
+            bridge_result = run_openvoice_bridge_direct(
+                queue_tts=queue_tts,
+                manifest_path=openvoice_manifest_explicit,
+                queue_path=openvoice_queue,
+                work_dir=openvoice_work,
+                logs_path=openvoice_logs,
+                preserve_dir=generated_audio,
+                openvoice_python=openvoice_python,
+                bridge_script=bridge_script,
+                openvoice_repo=openvoice_repo,
+                checkpoint_dir=checkpoint_dir,
+                language=ov_lang,
+                device=device,
+                allow_partial=args.allow_partial,
             )
             tts_engine_used = args.fallback_tts_engine
-    finally:
-        # Restore the config so we don't leak preserve_dir into other runs.
-        # Restore exactly: if a key existed before, put its original value back;
-        # if it did not exist, remove it. Never restore missing keys as empty
-        # strings (Blocker 4).
+
+        # Wrap into a CompletedProcess-like result for downstream code
+        result = bridge_result
+
+        if result.returncode != 0:
+            update_job_stage(job_json_path, "tts", "fail")
+            return die(f"OpenVoice bridge failed: {result.stderr[-1500:]}")
+        if not openvoice_manifest_explicit.is_file():
+            update_job_stage(job_json_path, "tts", "fail")
+            return die(f"OpenVoice manifest not found: {openvoice_manifest_explicit}")
+        update_job_stage(job_json_path, "tts", "pass")
+
+    # ====================================================================
+    # ORIGINAL VTV PIPELINE (when --speaker-profiling is off)
+    # ====================================================================
+    else:
+        # --- Configure OpenVoice settings in pyVideoTrans (Blocker 4) ---
+        PYVT_CONFIG.parent.mkdir(parents=True, exist_ok=True)
         if PYVT_CONFIG.is_file():
             try:
-                current = read_json(PYVT_CONFIG)
+                cfg = read_json(PYVT_CONFIG)
             except Exception:
-                current = {}
-            for key, state in cfg_original.items():
-                if state["existed"]:
-                    current[key] = state["value"]
-                else:
-                    current.pop(key, None)
-            write_json(PYVT_CONFIG, current)
+                cfg = {}
+        else:
+            cfg = {}
+        cfg_original: dict[str, dict] = {}
+        cfg_tracked_keys = (
+            "openvoice_default_reference",
+            PRESERVE_KEY,
+            "openvoice_queue_file",
+            "openvoice_manifest_file",
+            "openvoice_logs_file",
+            "openvoice_work_dir",
+            "openvoice_allow_partial",
+            "line_roles",
+            "speaker_type",
+            "hf_token",
+            "enable_diariz",
+        )
+        for key in cfg_tracked_keys:
+            cfg_original[key] = {
+                "existed": key in cfg,
+                "value": cfg.get(key),
+            }
+        cfg["openvoice_default_reference"] = reference.as_posix()
+        cfg[PRESERVE_KEY] = generated_audio.as_posix()
+        cfg["openvoice_queue_file"] = openvoice_queue.as_posix()
+        cfg["openvoice_manifest_file"] = openvoice_manifest_explicit.as_posix()
+        cfg["openvoice_logs_file"] = openvoice_logs.as_posix()
+        cfg["openvoice_work_dir"] = openvoice_work.as_posix()
+        cfg["openvoice_allow_partial"] = bool(args.allow_partial)
+        write_json(PYVT_CONFIG, cfg)
+        print(f"Active config: reference={reference.as_posix()} "
+              f"preserve_dir={generated_audio.as_posix()} "
+              f"cfg_path={PYVT_CONFIG.as_posix()}")
+
+        tts_provider = TTS_ENGINE_MAP[args.tts_engine]
+        fallback_provider = (
+            TTS_ENGINE_MAP[args.fallback_tts_engine]
+            if args.fallback_tts_engine != "none"
+            else None
+        )
+
+        def build_pyvt_cmd(provider: str) -> list[str]:
+            return [
+                py_python.as_posix(), "cli.py",
+                "--task", "vtv",
+                "--name", input_video.as_posix(),
+                "--recogn_type", recogn_type,
+                "--model_name", args.model,
+                "--source_language_code", args.source_language,
+                "--target_language_code", args.target_language,
+                "--tts_type", provider,
+                "--voice_role", "default",
+                "--subtitle_type", args.subtitle_type,
+                "--output-dir", output_dir.as_posix(),
+                "--no-clear-cache",
+                "--verbose",
+            ]
+
+        update_job_stage(job_json_path, "transcription", "running")
+        update_job_stage(job_json_path, "translation", "running")
+        update_job_stage(job_json_path, "tts", "running")
+        started = time.time()
+        cmd = build_pyvt_cmd(tts_provider)
+        tts_engine_used = args.tts_engine
+        fallback_attempted = False
+        try:
+            result = run_subprocess(cmd, PYVIDEOTRANS, "pyVideoTrans", env=pyvt_env)
+            if result.returncode != 0 and fallback_provider and fallback_provider != tts_provider:
+                print(
+                    f"Primary TTS engine '{args.tts_engine}' failed (exit "
+                    f"{result.returncode}). Retrying with fallback "
+                    f"'{args.fallback_tts_engine}'..."
+                )
+                fallback_attempted = True
+                fallback_cmd = build_pyvt_cmd(fallback_provider)
+                result = run_subprocess(
+                    fallback_cmd, PYVIDEOTRANS, "pyVideoTrans-fallback", env=pyvt_env,
+                )
+                tts_engine_used = args.fallback_tts_engine
+        finally:
+            if PYVT_CONFIG.is_file():
+                try:
+                    current = read_json(PYVT_CONFIG)
+                except Exception:
+                    current = {}
+                for key, state in cfg_original.items():
+                    if state["existed"]:
+                        current[key] = state["value"]
+                    else:
+                        current.pop(key, None)
+                write_json(PYVT_CONFIG, current)
 
     # --- Locate the OpenVoice manifest (Blocker 5) ---
     # Use the explicit job-scoped manifest path. Fall back to extracting
@@ -733,57 +1069,49 @@ def main() -> int:
             manifest = stable_manifest
 
     # --- Locate the SRT (Blocker 7: deterministic paths) ---
-    # pyVideoTrans writes SRTs into its cache_folder (tmp/<uuid>/). The uuid is
-    # deterministic (md5 of name+size+mtime), so we can predict the cache path.
-    # We try the deterministic cache path first, then fall back to scanning
-    # newly-created SRTs, then the legacy global scan.
-    srt_file: Path | None = None
+    # In the split pipeline, srt_file is already set from the STS step.
+    # In the VTV pipeline, we need to find it in the pyVideoTrans cache.
     job_source_srt = subtitles_dir / "source.srt"
-    # Compute the pyVideoTrans cache folder uuid (help_ffmpeg.format_video)
-    try:
-        import hashlib as _hashlib
-        stat = input_video.stat()
-        uuid_input = f"{input_video.as_posix()}-{stat.st_size}-{stat.st_mtime}"
-        pyvt_uuid = _hashlib.md5(uuid_input.encode()).hexdigest()[:10]
-        pyvt_cache = PYVIDEOTRANS / "tmp" / pyvt_uuid
-    except Exception:
-        pyvt_cache = None
+    if not srt_file:
+        # Compute the pyVideoTrans cache folder uuid (help_ffmpeg.format_video)
+        try:
+            import hashlib as _hashlib
+            stat = input_video.stat()
+            uuid_input = f"{input_video.as_posix()}-{stat.st_size}-{stat.st_mtime}"
+            pyvt_uuid = _hashlib.md5(uuid_input.encode()).hexdigest()[:10]
+            pyvt_cache = PYVIDEOTRANS / "tmp" / pyvt_uuid
+        except Exception:
+            pyvt_cache = None
 
-    if pyvt_cache and pyvt_cache.is_dir():
-        # Look for source + translated SRTs in the deterministic cache path
-        lang_lower = args.target_language.lower().replace("-", "")
-        src_lower = args.source_language.lower().replace("-", "")
-        # pyVideoTrans names SRTs like: faster-YYYYMMDD-HH_MM_SS.srt or
-        # <lang>-dubbing.srt. We take the most recently modified matching file.
-        cache_srts = list(pyvt_cache.glob("*.srt"))
-        if cache_srts:
-            # Try to find a translated/target-language SRT
-            lang_matches = [p for p in cache_srts if lang_lower in p.name.lower()]
-            if not lang_matches:
-                # Fall back to any SRT that's not obviously the source
-                lang_matches = [p for p in cache_srts if src_lower not in p.name.lower()]
-            chosen = (
-                lang_matches[0] if lang_matches
-                else max(cache_srts, key=lambda p: p.stat().st_mtime)
-            )
-            shutil.copy2(chosen, job_srt)
-            srt_file = job_srt
-            # Also copy a source SRT if present
-            src_matches = [p for p in cache_srts if src_lower in p.name.lower()]
-            if src_matches:
-                shutil.copy2(src_matches[0], job_source_srt)
+        if pyvt_cache and pyvt_cache.is_dir():
+            # Look for source + translated SRTs in the deterministic cache path
+            lang_lower = args.target_language.lower().replace("-", "")
+            src_lower = args.source_language.lower().replace("-", "")
+            cache_srts = list(pyvt_cache.glob("*.srt"))
+            if cache_srts:
+                lang_matches = [p for p in cache_srts if lang_lower in p.name.lower()]
+                if not lang_matches:
+                    lang_matches = [p for p in cache_srts if src_lower not in p.name.lower()]
+                chosen = (
+                    lang_matches[0] if lang_matches
+                    else max(cache_srts, key=lambda p: p.stat().st_mtime)
+                )
+                shutil.copy2(chosen, job_srt)
+                srt_file = job_srt
+                src_matches = [p for p in cache_srts if src_lower in p.name.lower()]
+                if src_matches:
+                    shutil.copy2(src_matches[0], job_source_srt)
 
-    if not srt_file and args.legacy_artifact_scan:
-        legacy_srt = latest_srt(started)
-        if legacy_srt and legacy_srt.is_file():
-            shutil.copy2(legacy_srt, job_srt)
-            srt_file = job_srt
-    elif not srt_file:
-        # Last-resort fallback: scan newly created SRTs (less deterministic)
-        new_srts = [
-            p for p in (PYVIDEOTRANS / "tmp").rglob("*.srt")
-            if p.stat().st_mtime >= started
-        ]
+        if not srt_file and args.legacy_artifact_scan:
+            legacy_srt = latest_srt(started)
+            if legacy_srt and legacy_srt.is_file():
+                shutil.copy2(legacy_srt, job_srt)
+                srt_file = job_srt
+        elif not srt_file:
+            new_srts = [
+                p for p in (PYVIDEOTRANS / "tmp").rglob("*.srt")
+                if p.stat().st_mtime >= started
+            ]
         if new_srts:
             lang_lower = args.target_language.lower().replace("-", "")
             lang_matches = [p for p in new_srts if lang_lower in p.name.lower()]

@@ -119,3 +119,205 @@ def test_manifest_enrichment_injects_speaker_id():
     assert manifest_data["results"][1]["speaker_id"] == "SPEAKER_01"
     assert manifest_data["results"][1]["target_gender"] == "female"
     assert manifest_data["results"][1]["target_pitch_median_hz"] == 210.0
+
+
+# ---------------------------------------------------------------------------
+# Tests for parse_srt_to_segments (v0.9: split pipeline)
+# ---------------------------------------------------------------------------
+
+SAMPLE_SRT = """1
+00:00:01,200 --> 00:00:04,800
+Hello, how are you?
+
+2
+00:00:05,000 --> 00:00:08,500
+I'm fine, thank you.
+
+3
+00:00:09,000 --> 00:00:12,000
+Goodbye then.
+"""
+
+
+def test_parse_srt_to_segments_basic():
+    """Verify SRT parsing extracts correct timings and text."""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".srt", delete=False, encoding="utf-8"
+    ) as f:
+        f.write(SAMPLE_SRT)
+        f.flush()
+        srt_path = Path(f.name)
+    try:
+        segments = run_personal_dub.parse_srt_to_segments(srt_path)
+        assert len(segments) == 3
+        assert segments[0]["segment_index"] == 0
+        assert segments[0]["start"] == 1.2
+        assert segments[0]["end"] == 4.8
+        assert "Hello" in segments[0]["text"]
+        assert segments[1]["segment_index"] == 1
+        assert segments[1]["start"] == 5.0
+        assert segments[1]["end"] == 8.5
+        assert segments[2]["segment_index"] == 2
+        assert segments[2]["start"] == 9.0
+        assert segments[2]["end"] == 12.0
+    finally:
+        srt_path.unlink(missing_ok=True)
+
+
+def test_parse_srt_to_segments_empty():
+    """Empty SRT returns no segments."""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".srt", delete=False, encoding="utf-8"
+    ) as f:
+        f.write("")
+        f.flush()
+        srt_path = Path(f.name)
+    try:
+        segments = run_personal_dub.parse_srt_to_segments(srt_path)
+        assert segments == []
+    finally:
+        srt_path.unlink(missing_ok=True)
+
+
+def test_parse_srt_to_segments_bom():
+    """SRT with UTF-8 BOM is handled correctly."""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".srt", delete=False, encoding="utf-8-sig"
+    ) as f:
+        f.write(SAMPLE_SRT)
+        f.flush()
+        srt_path = Path(f.name)
+    try:
+        segments = run_personal_dub.parse_srt_to_segments(srt_path)
+        assert len(segments) == 3
+        assert segments[0]["start"] == 1.2
+    finally:
+        srt_path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Tests for build_queue_tts_with_speakers (v0.9: per-speaker ref_wav routing)
+# ---------------------------------------------------------------------------
+
+SPEAKER_PROFILES = {
+    "speakers": [
+        {
+            "speaker_id": "SPEAKER_00",
+            "reference_audio": "",  # filled per-test
+            "gender": {"label": "male", "confidence": 0.8},
+            "pitch": {"median_f0_hz": 120.0},
+        },
+        {
+            "speaker_id": "SPEAKER_01",
+            "reference_audio": "",  # filled per-test
+            "gender": {"label": "female", "confidence": 0.85},
+            "pitch": {"median_f0_hz": 210.0},
+        },
+    ],
+    "segment_assignments": [
+        {"segment_index": 0, "speaker_id": "SPEAKER_00", "start": 1.2, "end": 4.8},
+        {"segment_index": 1, "speaker_id": "SPEAKER_01", "start": 5.0, "end": 8.5},
+        {"segment_index": 2, "speaker_id": "SPEAKER_00", "start": 9.0, "end": 12.0},
+    ],
+}
+
+
+def test_build_queue_tts_with_speakers_routes_ref_wav(tmp_path):
+    """Verify each queue item gets the correct per-speaker ref_wav."""
+    # Create dummy reference WAVs
+    ref0 = tmp_path / "SPEAKER_00" / "reference.wav"
+    ref1 = tmp_path / "SPEAKER_01" / "reference.wav"
+    ref0.parent.mkdir(parents=True)
+    ref1.parent.mkdir(parents=True)
+    ref0.write_bytes(b"RIFF\x00")
+    ref1.write_bytes(b"RIFF\x00")
+
+    profiles = json.loads(json.dumps(SPEAKER_PROFILES))
+    profiles["speakers"][0]["reference_audio"] = ref0.as_posix()
+    profiles["speakers"][1]["reference_audio"] = ref1.as_posix()
+
+    # Write a translated SRT
+    srt_path = tmp_path / "translated.srt"
+    srt_path.write_text(SAMPLE_SRT, encoding="utf-8")
+
+    cache_folder = tmp_path / "cache"
+    cache_folder.mkdir()
+
+    queue = run_personal_dub.build_queue_tts_with_speakers(
+        translated_srt=srt_path,
+        speaker_profiles=profiles,
+        cache_folder=cache_folder,
+        tts_type=34,
+    )
+
+    assert len(queue) == 3
+    # Segment 0 -> SPEAKER_00
+    assert queue[0]["ref_wav"] == ref0.as_posix()
+    assert queue[0]["voice_reference"] == ref0.as_posix()
+    assert queue[0]["role"] == "clone"
+    assert queue[0]["line"] == 1
+    assert queue[0]["start_time"] == 1200
+    assert queue[0]["end_time"] == 4800
+    # Segment 1 -> SPEAKER_01
+    assert queue[1]["ref_wav"] == ref1.as_posix()
+    assert queue[1]["voice_reference"] == ref1.as_posix()
+    # Segment 2 -> SPEAKER_00 (back to speaker 0)
+    assert queue[2]["ref_wav"] == ref0.as_posix()
+    assert queue[2]["voice_reference"] == ref0.as_posix()
+
+
+def test_build_queue_tts_fails_on_missing_ref_wav(tmp_path):
+    """Queue building fails hard when a speaker's reference_audio is missing."""
+    profiles = json.loads(json.dumps(SPEAKER_PROFILES))
+    profiles["speakers"][0]["reference_audio"] = "/nonexistent/ref0.wav"
+    profiles["speakers"][1]["reference_audio"] = "/nonexistent/ref1.wav"
+
+    srt_path = tmp_path / "translated.srt"
+    srt_path.write_text(SAMPLE_SRT, encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="no reference_audio"):
+        run_personal_dub.build_queue_tts_with_speakers(
+            translated_srt=srt_path,
+            speaker_profiles=profiles,
+            cache_folder=tmp_path / "cache",
+            tts_type=34,
+        )
+
+
+def test_build_queue_tts_fails_on_missing_segment_assignments(tmp_path):
+    """Queue building with empty segment_assignments raises RuntimeError.
+
+    With no segment_assignments, every segment gets speaker_id="" which
+    maps to no profile, so ref_wav is "" -> the function raises.
+    This is the v0.9 "no fake progress" guarantee.
+    """
+    profiles = {
+        "speakers": SPEAKER_PROFILES["speakers"],
+        "segment_assignments": [],
+    }
+    srt_path = tmp_path / "translated.srt"
+    srt_path.write_text(SAMPLE_SRT, encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="no reference_audio"):
+        run_personal_dub.build_queue_tts_with_speakers(
+            translated_srt=srt_path,
+            speaker_profiles=profiles,
+            cache_folder=tmp_path / "cache",
+            tts_type=34,
+        )
+
+
+def test_build_queue_tts_empty_srt(tmp_path):
+    """Empty translated SRT produces empty queue."""
+    profiles = {"speakers": [], "segment_assignments": []}
+    srt_path = tmp_path / "empty.srt"
+    srt_path.write_text("", encoding="utf-8")
+    # With empty SRT, parse_srt_to_segments returns [], so the loop
+    # doesn't execute and we get an empty queue (no ref_wav check needed)
+    queue = run_personal_dub.build_queue_tts_with_speakers(
+        translated_srt=srt_path,
+        speaker_profiles=profiles,
+        cache_folder=tmp_path / "cache",
+        tts_type=34,
+    )
+    assert queue == []

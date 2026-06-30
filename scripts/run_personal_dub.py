@@ -642,6 +642,30 @@ def main() -> int:
     speaker_profiles_data: dict | None = None
     use_split_pipeline = bool(args.speaker_profiling or args.speaker_profile_json)
     if use_split_pipeline:
+        # The split pipeline uses the OpenVoice bridge directly for per-speaker
+        # ref_wav routing. Qwen3-TTS and OmniVoice do not have bridge
+        # implementations yet, so accepting them here would be a lie — the
+        # code would silently fall through to OpenVoice regardless of the
+        # --tts-engine flag. Reject them explicitly until real bridges exist.
+        SUPPORTED_SPLIT_ENGINES = {"openvoice"}
+        if args.tts_engine not in SUPPORTED_SPLIT_ENGINES:
+            return die(
+                f"--tts-engine '{args.tts_engine}' is not supported in "
+                f"speaker-profiling mode. The split pipeline requires the "
+                f"OpenVoice bridge for per-speaker ref_wav routing, but "
+                f"'{args.tts_engine}' has no bridge implementation. "
+                f"Either drop --speaker-profiling / --speaker-profile-json "
+                f"to use the VTV pipeline (which supports all engines), or "
+                f"use --tts-engine openvoice. Supported engines in split "
+                f"mode: {', '.join(sorted(SUPPORTED_SPLIT_ENGINES))}."
+            )
+        if args.fallback_tts_engine != "none" and args.fallback_tts_engine not in SUPPORTED_SPLIT_ENGINES:
+            return die(
+                f"--fallback-tts-engine '{args.fallback_tts_engine}' is not "
+                f"supported in speaker-profiling mode for the same reason. "
+                f"Use --fallback-tts-engine none or --fallback-tts-engine "
+                f"openvoice. Supported: {', '.join(sorted(SUPPORTED_SPLIT_ENGINES))}."
+            )
         speakers_dir.mkdir(parents=True, exist_ok=True)
         if args.speaker_profile_json:
             src_profile = Path(args.speaker_profile_json).expanduser().resolve()
@@ -925,46 +949,40 @@ def main() -> int:
         tts_engine_used = args.tts_engine
         fallback_attempted = False
 
-        # Handle fallback engine
+        # Handle fallback engine (only OpenVoice is supported in split mode;
+        # non-OpenVoice fallbacks are rejected at the entry point)
         if bridge_result.returncode != 0 and args.fallback_tts_engine != "none":
-            if args.fallback_tts_engine != "openvoice":
-                print(
-                    f"WARNING: fallback engine '{args.fallback_tts_engine}' is "
-                    f"not supported in split pipeline (only OpenVoice supports "
-                    f"per-speaker ref_wav). Skipping fallback."
-                )
-            else:
-                print(
-                    f"Primary TTS engine '{args.tts_engine}' failed (exit "
-                    f"{bridge_result.returncode}). Retrying with fallback "
-                    f"'{args.fallback_tts_engine}'..."
-                )
-                fallback_attempted = True
-                # Rebuild queue with fallback provider
-                fallback_provider_int = int(TTS_ENGINE_MAP[args.fallback_tts_engine])
-                queue_tts = build_queue_tts_with_speakers(
-                    translated_srt=job_srt,
-                    speaker_profiles=speaker_profiles_data,
-                    cache_folder=cache_folder,
-                    tts_type=fallback_provider_int,
-                    language=args.target_language,
-                )
-                bridge_result = run_openvoice_bridge_direct(
-                    queue_tts=queue_tts,
-                    manifest_path=openvoice_manifest_explicit,
-                    queue_path=openvoice_queue,
-                    work_dir=openvoice_work,
-                    logs_path=openvoice_logs,
-                    preserve_dir=generated_audio,
-                    openvoice_python=openvoice_python,
-                    bridge_script=bridge_script,
-                    openvoice_repo=openvoice_repo,
-                    checkpoint_dir=checkpoint_dir,
-                    language=ov_lang,
-                    device=device,
-                    allow_partial=args.allow_partial,
-                )
-                tts_engine_used = args.fallback_tts_engine
+            print(
+                f"Primary TTS engine '{args.tts_engine}' failed (exit "
+                f"{bridge_result.returncode}). Retrying with fallback "
+                f"'{args.fallback_tts_engine}'..."
+            )
+            fallback_attempted = True
+            # Rebuild queue with fallback provider
+            fallback_provider_int = int(TTS_ENGINE_MAP[args.fallback_tts_engine])
+            queue_tts = build_queue_tts_with_speakers(
+                translated_srt=job_srt,
+                speaker_profiles=speaker_profiles_data,
+                cache_folder=cache_folder,
+                tts_type=fallback_provider_int,
+                language=args.target_language,
+            )
+            bridge_result = run_openvoice_bridge_direct(
+                queue_tts=queue_tts,
+                manifest_path=openvoice_manifest_explicit,
+                queue_path=openvoice_queue,
+                work_dir=openvoice_work,
+                logs_path=openvoice_logs,
+                preserve_dir=generated_audio,
+                openvoice_python=openvoice_python,
+                bridge_script=bridge_script,
+                openvoice_repo=openvoice_repo,
+                checkpoint_dir=checkpoint_dir,
+                language=ov_lang,
+                device=device,
+                allow_partial=args.allow_partial,
+            )
+            tts_engine_used = args.fallback_tts_engine
 
         # Wrap into a CompletedProcess-like result for downstream code
         result = bridge_result

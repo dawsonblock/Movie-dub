@@ -321,3 +321,101 @@ def test_build_queue_tts_empty_srt(tmp_path):
         tts_type=34,
     )
     assert queue == []
+
+
+# ---------------------------------------------------------------------------
+# Tests for split-pipeline engine guard (v0.10: no more fake TTS engine routing)
+# ---------------------------------------------------------------------------
+
+def _run_main_with_args(argv: list[str], tmp_path: Path) -> tuple[int, str]:
+    """Invoke run_personal_dub.main() with a fake sys.argv.
+
+    Returns (exit_code, stderr_text). We mock the input video to exist
+    so argparse validation passes up to the engine guard.
+    """
+    input_video = tmp_path / "input.mp4"
+    input_video.write_bytes(b"\x00" * 1024)
+    reference = tmp_path / "ref.wav"
+    reference.write_bytes(b"RIFF\x00")
+    full_argv = [
+        "run_personal_dub.py",
+        "--input", input_video.as_posix(),
+        "--reference", reference.as_posix(),
+        "--output", (tmp_path / "output" / "dubbed.mp4").as_posix(),
+        *argv,
+    ]
+    import io
+    import unittest.mock as mock
+    stderr_buf = io.StringIO()
+    with mock.patch.object(sys, "argv", full_argv), \
+         mock.patch.object(sys, "stderr", stderr_buf):
+        rc = run_personal_dub.main()
+    return rc, stderr_buf.getvalue()
+
+
+def test_split_pipeline_rejects_qwen3_local(tmp_path):
+    """--tts-engine qwen3-local + --speaker-profiling must fail.
+
+    The split pipeline only supports OpenVoice for per-speaker ref_wav
+    routing. Accepting qwen3-local would silently run OpenVoice anyway,
+    which is a lie. This test proves the guard works.
+    """
+    rc, stderr = _run_main_with_args(
+        ["--speaker-profiling", "--tts-engine", "qwen3-local"],
+        tmp_path,
+    )
+    assert rc != 0, "qwen3-local should be rejected in split mode"
+    assert "not supported" in stderr or "qwen3-local" in stderr
+
+
+def test_split_pipeline_rejects_omnivoice(tmp_path):
+    """--tts-engine omnivoice + --speaker-profiling must fail."""
+    rc, stderr = _run_main_with_args(
+        ["--speaker-profiling", "--tts-engine", "omnivoice"],
+        tmp_path,
+    )
+    assert rc != 0, "omnivoice should be rejected in split mode"
+    assert "not supported" in stderr or "omnivoice" in stderr
+
+
+def test_split_pipeline_rejects_qwen3_fallback(tmp_path):
+    """--fallback-tts-engine qwen3-local + --speaker-profiling must fail."""
+    rc, stderr = _run_main_with_args(
+        ["--speaker-profiling",
+         "--tts-engine", "openvoice",
+         "--fallback-tts-engine", "qwen3-local"],
+        tmp_path,
+    )
+    assert rc != 0, "qwen3-local fallback should be rejected in split mode"
+    assert "not supported" in stderr or "qwen3-local" in stderr
+
+
+def test_split_pipeline_accepts_openvoice(tmp_path):
+    """--tts-engine openvoice + --speaker-profiling must NOT be rejected
+    by the engine guard. It will fail later (no checkpoints, etc.) but
+    the guard message must not appear."""
+    rc, stderr = _run_main_with_args(
+        ["--speaker-profiling", "--tts-engine", "openvoice"],
+        tmp_path,
+    )
+    # rc may be non-zero from a later step (missing venv, etc.), but the
+    # engine guard message must NOT be in stderr.
+    assert "not supported" not in stderr, (
+        f"openvoice should not be rejected by engine guard, but stderr "
+        f"says: {stderr}"
+    )
+
+
+def test_vtv_pipeline_accepts_qwen3_local(tmp_path):
+    """--tts-engine qwen3-local WITHOUT --speaker-profiling must NOT
+    be rejected by the engine guard. The VTV pipeline supports all engines."""
+    rc, stderr = _run_main_with_args(
+        ["--tts-engine", "qwen3-local"],
+        tmp_path,
+    )
+    # rc may be non-zero from a later step, but the engine guard message
+    # must NOT appear (we're not in split mode).
+    assert "not supported" not in stderr, (
+        f"qwen3-local should not be rejected in VTV mode, but stderr "
+        f"says: {stderr}"
+    )

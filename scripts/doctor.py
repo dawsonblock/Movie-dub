@@ -204,6 +204,50 @@ def checkpoint_dir() -> Path:
     return Path(raw).expanduser().resolve() if raw else OPENVOICE / "checkpoints_v2"
 
 
+# Qwen3-local runs on the wrapper python (sys.executable), NOT the
+# pyVideoTrans or OpenVoice venvs. doctor.py itself is run with python3,
+# so sys.executable here is the same interpreter the Makefile uses for
+# run_personal_dub.py and the Qwen3 bridge.
+QWEN3_MODEL_DIR = ROOT / "models" / "Qwen3-TTS-12Hz-0.6B-Base-bf16"
+QWEN3_REQUIRED_IMPORTS = ("mlx_audio", "soundfile", "librosa")
+
+
+def _qwen3_imports_ok() -> tuple[bool, list[str]]:
+    missing: list[str] = []
+    for mod in QWEN3_REQUIRED_IMPORTS:
+        try:
+            __import__(mod)
+        except Exception:
+            missing.append(mod)
+    return (not missing, missing)
+
+
+def _qwen3_model_present() -> bool:
+    return (QWEN3_MODEL_DIR / "model.safetensors").is_file()
+
+
+def _qwen3_ready() -> bool:
+    imports_ok, _ = _qwen3_imports_ok()
+    return imports_ok and _qwen3_model_present()
+
+
+def _qwen3_detail() -> str:
+    if _qwen3_ready():
+        return "ready"
+    imports_ok, missing = _qwen3_imports_ok()
+    if not imports_ok:
+        return (
+            f"missing imports on {sys.executable}: "
+            f"{', '.join(missing)} (run: make setup-qwen3)"
+        )
+    if not _qwen3_model_present():
+        return (
+            f"model not found at {QWEN3_MODEL_DIR} "
+            f"(run: make setup-qwen3)"
+        )
+    return "not configured (run: make setup-qwen3)"
+
+
 def checkpoints_ready(checkpoint_path: Path) -> bool:
     speaker_dir = checkpoint_path / "base_speakers" / "ses"
     return (
@@ -332,8 +376,8 @@ def collect_checks(
               required=False)
     )
     # Per-engine readiness (Blocker 4): report which TTS engines are configured.
-    # OpenVoice readiness is already checked above. Qwen3-local and OmniVoice
-    # have their own setup requirements that are not yet wired into setup scripts.
+    # OpenVoice readiness is already checked above. Qwen3-local has its own
+    # setup (make setup-qwen3); OmniVoice is not yet wired.
     checks.append(
         check("TTS Engines", "openvoice (provider 34)",
               need_openvoice and (ov_checkpoint_dir / "converter" / "checkpoint.pth").is_file(),
@@ -342,8 +386,9 @@ def collect_checks(
               required=False)
     )
     checks.append(
-        check("TTS Engines", "qwen3-local (provider 1)", False,
-              "not yet configured (run scripts/setup_qwen3_local.sh)",
+        check("TTS Engines", "qwen3-local (provider 1)",
+              _qwen3_ready(),
+              _qwen3_detail(),
               required=False)
     )
     checks.append(
@@ -437,10 +482,14 @@ def main() -> int:
                         help="require Demucs + vocal-separation dependencies")
     parser.add_argument("--checkpoints-only", action="store_true",
                         help="only check OpenVoice checkpoints (Blocker 9)")
+    parser.add_argument("--qwen3-only", action="store_true",
+                        help="only check Qwen3-local engine readiness")
     args = parser.parse_args()
 
     if args.checkpoints_only:
         return _checkpoints_only_main()
+    if args.qwen3_only:
+        return _qwen3_only_main()
 
     checks = collect_checks(
         need_openvoice=args.need_openvoice,
@@ -529,6 +578,22 @@ def _checkpoints_only_main() -> int:
     for item in cv["too_small"]:
         print(f"  - too small: {item}")
     return 1
+
+
+def _qwen3_only_main() -> int:
+    """Run only Qwen3-local engine readiness checks."""
+    imports_ok, missing = _qwen3_imports_ok()
+    model_ok = _qwen3_model_present()
+    print("Qwen3-local engine readiness")
+    print(f"  python:        {sys.executable}")
+    for mod in QWEN3_REQUIRED_IMPORTS:
+        ok = mod not in missing
+        print(f"  import {mod:<11} {'PASS' if ok else 'FAIL'}")
+    print(f"  model present  {'PASS' if model_ok else 'FAIL'} "
+          f"({QWEN3_MODEL_DIR})")
+    ready = imports_ok and model_ok
+    print("READY: " + ("yes" if ready else "no"))
+    return 0 if ready else 1
 
 
 if __name__ == "__main__":

@@ -298,7 +298,6 @@ def synthesize_segments(args: argparse.Namespace) -> int:
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
             # Generate audio with voice cloning
-            import mlx.core as mx
             import numpy as np
 
             gen_results = list(
@@ -424,7 +423,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--model-path", required=True,
         help=(
             "HuggingFace repo ID or local path for the Qwen3-TTS model "
-            "(e.g. aufklarer/Qwen3-TTS-12Hz-0.6B-Base-MLX-4bit)"
+            "(e.g. mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16). "
+            "Must include the speech_tokenizer/ subdir."
         ),
     )
     parser.add_argument(

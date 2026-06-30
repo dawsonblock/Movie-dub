@@ -1,4 +1,4 @@
-.PHONY: doctor doctor-strict doctor-demucs doctor-checkpoints setup-ffmpeg setup-pyvt setup-openvoice setup-checkpoints download-openvoice smoke-openvoice smoke-e2e test-openvoice test-pyvt dub proof proof-report generate-voices analyze-speakers verify-pitch clean
+.PHONY: doctor doctor-strict doctor-demucs doctor-checkpoints doctor-qwen3 setup-ffmpeg setup-pyvt setup-openvoice setup-qwen3 setup-checkpoints download-openvoice smoke-openvoice smoke-qwen3 smoke-e2e test-openvoice test-pyvt dub proof proof-report generate-voices analyze-speakers verify-pitch clean
 
 doctor:
 	python3 scripts/doctor.py
@@ -18,6 +18,9 @@ doctor-demucs:
 
 doctor-checkpoints:
 	python3 scripts/doctor.py --checkpoints-only
+
+doctor-qwen3:
+	python3 scripts/doctor.py --qwen3-only
 
 # Run all four pass gates in sequence. All must pass.
 # Note: doctor output is redirected to a file first, then tailed,
@@ -82,6 +85,9 @@ setup-pyvt:
 setup-openvoice:
 	bash scripts/setup_openvoice_mac.sh
 
+setup-qwen3:
+	bash scripts/setup_qwen3_local.sh
+
 setup-checkpoints:
 	python3 scripts/setup_openvoice_checkpoints.py
 
@@ -90,6 +96,9 @@ download-openvoice:
 
 smoke-openvoice:
 	python3 scripts/smoke_openvoice_bridge.py
+
+smoke-qwen3:
+	python3 scripts/smoke_qwen3.py
 
 smoke-e2e:
 	python3 scripts/smoke_e2e_short_clip.py
@@ -144,9 +153,10 @@ verify-pitch:
 #           NO_NORMALIZE=1 FINAL_GAIN=1.0
 #           BACKGROUND_TIMEOUT=900 LUFS_TIMEOUT=1200 FAIL_IF_BACKGROUND_MIX_FAILS=1
 #           DEMUCS_TIMEOUT=900 ALLOW_DEMUCS_DOWNLOAD=1
-#           SPEAKER_PROFILING=1 DIARIZATION=pyannite NUM_SPEAKERS=auto
+#           SPEAKER_PROFILING=1 DIARIZATION=pyannote NUM_SPEAKERS=auto
 #           TTS_ENGINE=openvoice FALLBACK_TTS_ENGINE=none
 #           VERIFY_PITCH=1 FAIL_ON_PITCH_MISMATCH=1
+#           PREFER_EMBEDDED_SUBTITLES=1 (NO_OCR_IMAGE_SUBS=1 to skip OCR)
 dub:
 	@if [ -z "$(INPUT)" ] || [ -z "$(OUTPUT)" ]; then \
 		echo "Usage: make dub INPUT=<input.mp4> OUTPUT=<output.mp4>"; \
@@ -156,6 +166,7 @@ dub:
 		echo "  DUCKING=1"; \
 		echo "  SPEAKER_PROFILING=1 DIARIZATION=pyannote TTS_ENGINE=openvoice"; \
 		echo "  VERIFY_PITCH=1 FAIL_ON_PITCH_MISMATCH=1"; \
+		echo "  PREFER_EMBEDDED_SUBTITLES=1 (use embedded subs as text+timing source)"; \
 		exit 1; \
 	fi
 	python3 scripts/run_personal_dub.py \
@@ -188,4 +199,6 @@ dub:
 		$(if $(TTS_ENGINE),--tts-engine $(TTS_ENGINE)) \
 		$(if $(FALLBACK_TTS_ENGINE),--fallback-tts-engine $(FALLBACK_TTS_ENGINE)) \
 		$(if $(VERIFY_PITCH),--verify-pitch) \
-		$(if $(FAIL_ON_PITCH_MISMATCH),--fail-on-pitch-mismatch)
+		$(if $(FAIL_ON_PITCH_MISMATCH),--fail-on-pitch-mismatch) \
+		$(if $(PREFER_EMBEDDED_SUBTITLES),--prefer-embedded-subtitles) \
+		$(if $(NO_OCR_IMAGE_SUBS),--no-ocr-image-subs)

@@ -214,7 +214,7 @@ def main() -> int:
     output_path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print()
-    print(f"verify_segment_pitch: PASS")
+    print("verify_segment_pitch: PASS")
     print(f"Output: {output_path}")
     print(
         f"Summary: ok={summary['ok']} needs_review={summary['needs_review']} "

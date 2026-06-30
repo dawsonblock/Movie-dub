@@ -61,7 +61,6 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
 
 
 SUPPORTED_DIARIZATION = ("pyannote", "built", "none")
@@ -257,7 +256,6 @@ def select_reference_clip(
             merged.append((t["start"], t["end"]))
 
     # Score each merged run: prefer longer runs, prefer middle of video
-    audio_len = spk_turns[-1]["end"] if spk_turns else 0.0
     # Get actual audio length from the longest turn end
     max_end = max(t["end"] for t in turns) if turns else 0.0
     mid = max_end / 2.0

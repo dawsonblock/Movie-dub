@@ -44,6 +44,9 @@ from dub_job_helpers import (
     write_remux_command as _write_remux_command,
     write_review_file as _write_review_file,
 )
+from extract_embedded_subtitles import (
+    extract_embedded_subtitles as _extract_embedded_subtitles,
+)
 from job_state import (
     PERSONAL_DUB_ROOT,
     UnsafeJobDirError,
@@ -66,6 +69,7 @@ BUILD_AUDIO_SCRIPT = ROOT / "scripts" / "build_dubbed_audio_from_manifest.py"
 REMUX_SCRIPT = ROOT / "scripts" / "remux_dubbed_video.py"
 GENDER_DETECT_SCRIPT = ROOT / "scripts" / "detect_gender.py"
 ANALYZE_SPEAKERS_SCRIPT = ROOT / "scripts" / "analyze_speakers.py"
+EXTRACT_SUBTITLES_SCRIPT = ROOT / "scripts" / "extract_embedded_subtitles.py"
 VERIFY_PITCH_SCRIPT = ROOT / "scripts" / "verify_segment_pitch.py"
 PYVT_CONFIG = PYVIDEOTRANS / "videotrans" / "cfg.json"
 PRESERVE_KEY = "openvoice_preserve_dir"
@@ -75,10 +79,14 @@ HUGGINGFACE_ASR_PROVIDER = "4"  # HuggingFace ASR for whisper-large-v3-turbo
 OPENVOICE_BRIDGE_SCRIPT = ROOT / "bridge" / "openvoice_segment_tts.py"
 QWEN3_BRIDGE_SCRIPT = ROOT / "bridge" / "qwen3_segment_tts.py"
 
-# Default Qwen3-TTS model (MLX 4-bit, 0.6B, supports voice cloning)
-QWEN3_DEFAULT_MODEL = "aufklarer/Qwen3-TTS-12Hz-0.6B-Base-MLX-4bit"
+# Default Qwen3-TTS model (MLX bf16, 0.6B Base, supports voice cloning).
+# This is the mlx-community repo that includes the speech_tokenizer/
+# subdir required by mlx-audio's post_load_hook. The aufklarer 4-bit
+# repo is Base-talker-only and is missing the speech tokenizer, so
+# model.generate() fails with "Speech tokenizer not loaded".
+QWEN3_DEFAULT_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16"
 # Local path fallback (if downloaded to models/)
-QWEN3_LOCAL_MODEL = ROOT / "models" / "Qwen3-TTS-12Hz-0.6B-Base-MLX-4bit"
+QWEN3_LOCAL_MODEL = ROOT / "models" / "Qwen3-TTS-12Hz-0.6B-Base-bf16"
 
 # TTS engine -> pyVideoTrans provider index (videotrans/tts/__init__.py)
 # openvoice   -> 34 (OpenVoice V2 local, current default)
@@ -127,6 +135,37 @@ def ffprobe_duration(path: Path) -> float:
         text=True, capture_output=True, check=True,
     )
     return float(result.stdout.strip())
+
+
+def _qwen3_preflight(model_arg: str) -> str | None:
+    """Pre-flight checks for the Qwen3-local TTS engine.
+
+    The Qwen3 bridge runs on sys.executable (the same python that runs
+    this wrapper), so mlx_audio / soundfile / librosa must be importable
+    here. Returns an error string if anything is missing, else None.
+    """
+    missing: list[str] = []
+    for mod in ("mlx_audio", "soundfile", "librosa"):
+        try:
+            __import__(mod)
+        except Exception:
+            missing.append(mod)
+    if missing:
+        return (
+            f"Qwen3-local requires these packages importable from the "
+            f"wrapper python ({sys.executable}): "
+            f"{', '.join(missing)}. Run: make setup-qwen3"
+        )
+    # Model resolution: local dir wins, else the HF repo ID is fetched
+    # on first generate. We only check the local dir here; the HF path
+    # is validated lazily by mlx-audio.
+    if model_arg == QWEN3_DEFAULT_MODEL and QWEN3_LOCAL_MODEL.is_dir():
+        return None
+    if model_arg and Path(model_arg).expanduser().is_dir():
+        return None
+    # If a custom repo ID was given, we can't prove it without network;
+    # let mlx-audio fail at generate time with a real error.
+    return None
 
 
 def _verify_final_video(video_path: Path, source_duration: float) -> dict:
@@ -223,7 +262,7 @@ def parse_srt_to_segments(srt_path: Path) -> list[dict]:
         if len(lines) < 2:
             continue
         # Find the time line (contains -->)
-        time_line = next((l for l in lines if "-->" in l), None)
+        time_line = next((ln for ln in lines if "-->" in ln), None)
         if not time_line:
             continue
         m = _re.match(
@@ -237,7 +276,7 @@ def parse_srt_to_segments(srt_path: Path) -> list[dict]:
         end = h2 * 3600 + m2 * 60 + s2 + ms2 / 1000.0
         # Text is everything after the time line
         text_lines = lines[lines.index(time_line) + 1:]
-        seg_text = " ".join(l.strip() for l in text_lines if l.strip())
+        seg_text = " ".join(ln.strip() for ln in text_lines if ln.strip())
         segments.append({
             "segment_index": idx,
             "start": round(start, 3),
@@ -482,6 +521,17 @@ def main() -> int:
                              "(useful when MPS runs out of memory)")
     parser.add_argument("--subtitle-type", default="1",
                         help="0=None 1=Hard 2=Soft 3=HardDual 4=SoftDual")
+    parser.add_argument("--prefer-embedded-subtitles", action="store_true",
+                        help="split pipeline: extract embedded subtitles as "
+                             "the text+timing source before running ASR. "
+                             "Falls back to whisper ASR when no usable "
+                             "embedded subtitle stream is found. Embedded "
+                             "subtitles give WHAT and WHEN; speaker identity "
+                             "(WHO) still comes from audio diarization.")
+    parser.add_argument("--no-ocr-image-subs", action="store_true",
+                        help="with --prefer-embedded-subtitles, skip OCR for "
+                             "image-based subtitles (PGS/VobSub) and go "
+                             "straight to ASR fallback")
     parser.add_argument("--job-dir", default="",
                         help="working directory "
                              "(default: tmp/personal_dub/<timestamp>)")
@@ -585,10 +635,46 @@ def main() -> int:
         return die(f"input video missing: {input_video}")
     if not py_python.is_file():
         return die(f"pyVideoTrans venv python missing: {py_python}")
-    if not (OPENVOICE / ".venv" / "bin" / "python").is_file():
-        return die(f"OpenVoice venv python missing: {OPENVOICE / '.venv' / 'bin' / 'python'}")
-    if not (OPENVOICE / "checkpoints_v2" / "converter" / "checkpoint.pth").is_file():
-        return die("OpenVoice checkpoints missing. Run: make download-openvoice")
+    # OpenVoice is required only when it is actually in use. The original
+    # VTV pipeline always uses OpenVoice (provider 34), so it is required
+    # there. The split pipeline (--speaker-profiling) routes TTS through a
+    # direct bridge; OpenVoice is only required there when it is the
+    # primary or fallback engine. Qwen3-local-only runs must NOT be
+    # blocked by a missing OpenVoice install.
+    use_split_pipeline_pre = bool(args.speaker_profiling or args.speaker_profile_json)
+    # --prefer-embedded-subtitles only has effect in the split pipeline
+    # (Step 0 lives inside the split-pipeline block). Reject it in VTV
+    # mode rather than silently ignoring it.
+    if args.prefer_embedded_subtitles and not use_split_pipeline_pre:
+        return die(
+            "--prefer-embedded-subtitles requires --speaker-profiling "
+            "(or --speaker-profile-json). The embedded-subtitle extraction "
+            "step is part of the split pipeline; the VTV pipeline manages "
+            "its own subtitles internally."
+        )
+    openvoice_in_use = (
+        not use_split_pipeline_pre
+        or args.tts_engine == "openvoice"
+        or args.fallback_tts_engine == "openvoice"
+    )
+    if openvoice_in_use:
+        if not (OPENVOICE / ".venv" / "bin" / "python").is_file():
+            return die(f"OpenVoice venv python missing: {OPENVOICE / '.venv' / 'bin' / 'python'}")
+        if not (OPENVOICE / "checkpoints_v2" / "converter" / "checkpoint.pth").is_file():
+            return die("OpenVoice checkpoints missing. Run: make download-openvoice")
+    # Qwen3-local pre-flight (only when it is the primary or fallback
+    # engine). The bridge runs on sys.executable, so the required
+    # packages (mlx_audio, soundfile, librosa) must be importable from
+    # this python. The model must also be resolvable.
+    qwen3_in_use = (
+        use_split_pipeline_pre
+        and (args.tts_engine == "qwen3-local"
+             or args.fallback_tts_engine == "qwen3-local")
+    )
+    if qwen3_in_use:
+        qwen3_err = _qwen3_preflight(args.qwen3_model)
+        if qwen3_err:
+            return die(qwen3_err)
     if not BUILD_AUDIO_SCRIPT.is_file() or not REMUX_SCRIPT.is_file():
         return die("build/remux scripts missing from scripts/")
 
@@ -807,37 +893,102 @@ def main() -> int:
     # ====================================================================
     srt_file: Path | None = None
     if use_split_pipeline:
+        # --- Step 0: embedded subtitles (text + timing source) ---
+        # Embedded subtitles give WHAT was said and WHEN. They never carry
+        # speaker identity — WHO comes from diarization in Step 3. When
+        # --prefer-embedded-subtitles is set, try to extract an embedded
+        # subtitle stream as the source SRT before paying for ASR. If no
+        # usable stream is found (none, image-based OCR failed, or OCR
+        # disabled), fall through to whisper ASR below.
+        source_srt: Path | None = None
+        subtitle_source_note = "asr"
+        if args.prefer_embedded_subtitles:
+            update_job_stage(job_json_path, "subtitle_extraction", "running")
+            try:
+                sub_result = _extract_embedded_subtitles(
+                    video=input_video,
+                    output_dir=subtitles_dir,
+                    source_language=args.source_language,
+                    ocr_image_subs=not args.no_ocr_image_subs,
+                    ffprobe=local_ffprobe(),
+                    ffmpeg=shutil.which("ffmpeg") or None,
+                )
+            except Exception as exc:
+                update_job_stage(job_json_path, "subtitle_extraction", "fail")
+                print(f"Embedded subtitle extraction error: {exc}")
+                sub_result = None
+            if sub_result and sub_result.srt_path:
+                extracted = Path(sub_result.srt_path)
+                # Validate the extracted SRT actually has cues before using
+                # it — a malformed/empty extract must not silently replace
+                # ASR.
+                cues = parse_srt_to_segments(extracted)
+                if cues:
+                    source_srt = subtitles_dir / "source.srt"
+                    if extracted != source_srt:
+                        shutil.copy2(extracted, source_srt)
+                    subtitle_source_note = sub_result.source or "embedded"
+                    print(
+                        f"Embedded subtitles: {sub_result.note} "
+                        f"({len(cues)} cues) — skipping ASR"
+                    )
+                    update_job_stage(
+                        job_json_path, "subtitle_extraction", "pass",
+                        extra={"subtitle_source": subtitle_source_note},
+                    )
+                else:
+                    print(
+                        f"Embedded subtitle extract had no cues "
+                        f"({sub_result.note}); falling back to ASR"
+                    )
+                    update_job_stage(
+                        job_json_path, "subtitle_extraction", "skip",
+                        extra={"subtitle_source": "asr"},
+                    )
+            else:
+                note = sub_result.note if sub_result else "no result"
+                print(f"Embedded subtitles: {note}; falling back to ASR")
+                update_job_stage(
+                    job_json_path, "subtitle_extraction", "skip",
+                    extra={"subtitle_source": "asr"},
+                )
+
         # --- Step 1: STT (speech-to-text) → source SRT ---
-        update_job_stage(job_json_path, "transcription", "running")
-        stt_output = job_dir / "stt_output"
-        stt_output.mkdir(parents=True, exist_ok=True)
-        stt_cmd = [
-            py_python.as_posix(), "cli.py",
-            "--task", "stt",
-            "--name", input_video.as_posix(),
-            "--recogn_type", recogn_type,
-            "--model_name", args.model,
-            "--detect_language", args.source_language,
-            "--output-dir", stt_output.as_posix(),
-            "--no-clear-cache",
-            "--verbose",
-        ]
-        stt_result = run_subprocess(stt_cmd, PYVIDEOTRANS, "stt", env=pyvt_env)
-        if stt_result.returncode != 0:
-            update_job_stage(job_json_path, "transcription", "fail")
-            return die(f"STT failed: {stt_result.stderr[-1500:]}")
-        # Find the source SRT in stt_output
-        source_srt = stt_output / f"{input_video.stem}.srt"
-        if not source_srt.is_file():
-            # Fallback: scan for any SRT
-            srts = list(stt_output.glob("*.srt"))
-            if not srts:
+        # Only run ASR when embedded subtitles did not provide a source SRT.
+        if source_srt is None:
+            update_job_stage(job_json_path, "transcription", "running")
+            stt_output = job_dir / "stt_output"
+            stt_output.mkdir(parents=True, exist_ok=True)
+            stt_cmd = [
+                py_python.as_posix(), "cli.py",
+                "--task", "stt",
+                "--name", input_video.as_posix(),
+                "--recogn_type", recogn_type,
+                "--model_name", args.model,
+                "--detect_language", args.source_language,
+                "--output-dir", stt_output.as_posix(),
+                "--no-clear-cache",
+                "--verbose",
+            ]
+            stt_result = run_subprocess(stt_cmd, PYVIDEOTRANS, "stt", env=pyvt_env)
+            if stt_result.returncode != 0:
                 update_job_stage(job_json_path, "transcription", "fail")
-                return die(f"STT produced no SRT in {stt_output}")
-            source_srt = srts[0]
-        shutil.copy2(source_srt, subtitles_dir / "source.srt")
-        print(f"Source SRT: {source_srt}")
-        update_job_stage(job_json_path, "transcription", "pass")
+                return die(f"STT failed: {stt_result.stderr[-1500:]}")
+            # Find the source SRT in stt_output
+            source_srt = stt_output / f"{input_video.stem}.srt"
+            if not source_srt.is_file():
+                # Fallback: scan for any SRT
+                srts = list(stt_output.glob("*.srt"))
+                if not srts:
+                    update_job_stage(job_json_path, "transcription", "fail")
+                    return die(f"STT produced no SRT in {stt_output}")
+                source_srt = srts[0]
+            shutil.copy2(source_srt, subtitles_dir / "source.srt")
+            print(f"Source SRT (ASR): {source_srt}")
+            update_job_stage(job_json_path, "transcription", "pass")
+        else:
+            # Embedded subtitles already produced source.srt; nothing to do.
+            print(f"Source SRT (embedded): {source_srt}")
 
         # --- Step 2: STS (subtitle translation) → translated SRT ---
         update_job_stage(job_json_path, "translation", "running")
@@ -876,6 +1027,29 @@ def main() -> int:
         srt_file = job_srt
         print(f"Translated SRT: {translated_srt}")
         update_job_stage(job_json_path, "translation", "pass")
+
+        # --- Step 2b: validate source/translated segment-count alignment ---
+        # Speaker assignments from analyze_speakers are indexed by
+        # segment_index from the SOURCE SRT. build_queue_tts_with_speakers
+        # looks up speakers by the same index in the TRANSLATED SRT. This
+        # only works if STS preserved the cue count and order.
+        # pyVideoTrans check_target_sub() normally forces the translated
+        # count back to the source count (reconstructing with source
+        # timecodes), but LLM re-sentence can break this. Fail hard here
+        # rather than silently misassigning speakers to wrong lines.
+        source_seg_count = len(parse_srt_to_segments(source_srt))
+        translated_seg_count = len(parse_srt_to_segments(job_srt))
+        if source_seg_count != translated_seg_count:
+            update_job_stage(job_json_path, "translation", "fail")
+            return die(
+                f"STS changed segment count: source={source_seg_count}, "
+                f"translated={translated_seg_count}. Speaker assignments "
+                f"are indexed by source segment_index and would misalign "
+                f"with the translated cues. This usually means LLM "
+                f"re-sentence is enabled in pyVideoTrans config — disable "
+                f"it for the split pipeline, or re-run without "
+                f"--speaker-profiling to use the VTV pipeline."
+            )
 
         # --- Step 3: analyze_speakers with real segment timings ---
         # Parse the source SRT to get segments with real start/end times,
@@ -957,10 +1131,9 @@ def main() -> int:
         update_job_stage(job_json_path, "tts", "running")
         # Compute the pyVideoTrans cache folder for output WAV paths
         try:
-            import hashlib as _hashlib
             stat = input_video.stat()
             uuid_input = f"{input_video.as_posix()}-{stat.st_size}-{stat.st_mtime}"
-            pyvt_uuid = _hashlib.md5(uuid_input.encode()).hexdigest()[:10]
+            pyvt_uuid = hashlib.md5(uuid_input.encode()).hexdigest()[:10]
             cache_folder = PYVIDEOTRANS / "tmp" / pyvt_uuid
         except Exception:
             cache_folder = job_dir / "tts_cache"
@@ -987,16 +1160,32 @@ def main() -> int:
         started = time.time()
 
         def _run_bridge(engine: str, q_tts: list[dict]) -> subprocess.CompletedProcess:
-            """Dispatch to the correct TTS bridge for the given engine."""
+            """Dispatch to the correct TTS bridge for the given engine.
+
+            Always returns a subprocess.CompletedProcess (never a bare int
+            from die()) so callers can safely read .returncode / .stderr.
+            Pre-flight failures are encoded as a CompletedProcess with
+            returncode=1 and the error message in stderr.
+            """
+            def _fail(msg: str) -> subprocess.CompletedProcess:
+                # Print the same way die() would, but return a
+                # CompletedProcess so the caller's .returncode access is
+                # safe and the fallback logic can trigger cleanly.
+                print(f"run_personal_dub: {msg}", file=sys.stderr)
+                return subprocess.CompletedProcess(
+                    args=["_run_bridge", engine], returncode=1,
+                    stdout="", stderr=msg,
+                )
+
             if engine == "openvoice":
                 openvoice_python = OPENVOICE / ".venv" / "bin" / "python"
                 if not openvoice_python.is_file():
-                    return die(f"OpenVoice venv python missing: {openvoice_python}")
+                    return _fail(f"OpenVoice venv python missing: {openvoice_python}")
                 if not OPENVOICE_BRIDGE_SCRIPT.is_file():
-                    return die(f"OpenVoice bridge script missing: {OPENVOICE_BRIDGE_SCRIPT}")
+                    return _fail(f"OpenVoice bridge script missing: {OPENVOICE_BRIDGE_SCRIPT}")
                 checkpoint_dir = OPENVOICE / "checkpoints_v2"
                 if not (checkpoint_dir / "converter" / "checkpoint.pth").is_file():
-                    return die(f"OpenVoice checkpoints missing: {checkpoint_dir}")
+                    return _fail(f"OpenVoice checkpoints missing: {checkpoint_dir}")
                 # Normalize language for OpenVoice
                 ov_lang = args.target_language.upper()
                 if ov_lang.startswith("ZH"):
@@ -1020,7 +1209,7 @@ def main() -> int:
                 )
             elif engine == "qwen3-local":
                 if not QWEN3_BRIDGE_SCRIPT.is_file():
-                    return die(f"Qwen3 bridge script missing: {QWEN3_BRIDGE_SCRIPT}")
+                    return _fail(f"Qwen3 bridge script missing: {QWEN3_BRIDGE_SCRIPT}")
                 # Resolve model path: use local dir if it exists, else HF repo ID
                 model_path = args.qwen3_model
                 if QWEN3_LOCAL_MODEL.is_dir() and model_path == QWEN3_DEFAULT_MODEL:
@@ -1040,7 +1229,7 @@ def main() -> int:
                     allow_partial=args.allow_partial,
                 )
             else:
-                return die(f"Unsupported TTS engine in split mode: {engine}")
+                return _fail(f"Unsupported TTS engine in split mode: {engine}")
 
         bridge_result = _run_bridge(args.tts_engine, queue_tts)
         tts_engine_used = args.tts_engine
@@ -1072,10 +1261,41 @@ def main() -> int:
 
         if result.returncode != 0:
             update_job_stage(job_json_path, "tts", "fail")
-            return die(f"OpenVoice bridge failed: {result.stderr[-1500:]}")
+            return die(f"TTS bridge ({tts_engine_used}) failed: {result.stderr[-1500:]}")
         if not openvoice_manifest_explicit.is_file():
             update_job_stage(job_json_path, "tts", "fail")
-            return die(f"OpenVoice manifest not found: {openvoice_manifest_explicit}")
+            return die(f"TTS manifest not found: {openvoice_manifest_explicit}")
+        # Validate the manifest has at least one successful segment. A
+        # bridge can exit 0 with an empty manifest or all-failed results;
+        # without this check, downstream build_dubbed_audio would produce
+        # a silent track.
+        try:
+            _manifest = read_json(openvoice_manifest_explicit)
+        except Exception as exc:
+            update_job_stage(job_json_path, "tts", "fail")
+            return die(f"failed to read TTS manifest: {exc}")
+        _results = _manifest.get("results", _manifest.get("segments", []))
+        _ok_count = sum(1 for r in _results if r.get("status") == "ok")
+        if _ok_count == 0:
+            update_job_stage(job_json_path, "tts", "fail")
+            return die(
+                f"TTS bridge produced no successful segments "
+                f"(manifest has {len(_results)} entries, 0 ok). "
+                f"Bridge status: {_manifest.get('status', '?')}"
+            )
+        if not args.allow_partial and _ok_count < len(_results):
+            update_job_stage(job_json_path, "tts", "fail")
+            return die(
+                f"TTS bridge had partial failures: {_ok_count}/"
+                f"{len(_results)} segments ok. Use --allow-partial to "
+                f"proceed with silent gaps for failed segments."
+            )
+        if _ok_count < len(_results):
+            print(
+                f"WARNING: TTS bridge partial success: "
+                f"{_ok_count}/{len(_results)} segments ok "
+                f"(--allow-partial accepted)"
+            )
         update_job_stage(job_json_path, "tts", "pass")
 
     # ====================================================================
@@ -1211,10 +1431,9 @@ def main() -> int:
     if not srt_file:
         # Compute the pyVideoTrans cache folder uuid (help_ffmpeg.format_video)
         try:
-            import hashlib as _hashlib
             stat = input_video.stat()
             uuid_input = f"{input_video.as_posix()}-{stat.st_size}-{stat.st_mtime}"
-            pyvt_uuid = _hashlib.md5(uuid_input.encode()).hexdigest()[:10]
+            pyvt_uuid = hashlib.md5(uuid_input.encode()).hexdigest()[:10]
             pyvt_cache = PYVIDEOTRANS / "tmp" / pyvt_uuid
         except Exception:
             pyvt_cache = None

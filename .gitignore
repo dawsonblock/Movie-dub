@@ -22,6 +22,9 @@
 /pyvideotrans-main/models/
 /pyvideotrans-main/tmp/
 
+# Downloaded TTS model assets (Qwen3-TTS MLX models, ~2GB each)
+/models/
+
 # Dubbed output videos (large binary artifacts)
 /output/
 /pyvideotrans-main/output/

@@ -70,6 +70,14 @@ make download-openvoice
 make doctor
 ```
 
+Optional — Qwen3-TTS local engine (Apple Silicon, independent of OpenVoice):
+
+```bash
+make setup-qwen3
+make doctor-qwen3
+make smoke-qwen3
+```
+
 The default install does **not** require Demucs. Demucs is only needed for
 high-quality AI-based vocal separation. The default background extraction
 uses an ffmpeg fallback (center-channel pan filter).
@@ -87,7 +95,9 @@ python scripts/doctor.py --need-demucs      # require Demucs
 python scripts/doctor.py --need-vocal-separation  # require Demucs
 python scripts/doctor.py --strict           # require everything
 python scripts/doctor.py --checkpoints-only # only check OpenVoice checkpoints
+python scripts/doctor.py --qwen3-only       # only check Qwen3-local engine
 python scripts/doctor.py --no-openvoice     # skip OpenVoice (pyVideoTrans-only)
+python scripts/doctor.py --json             # machine-readable readiness JSON
 ```
 
 Checkpoints are not committed to git and are only downloaded when you explicitly run `make download-openvoice`.
@@ -110,6 +120,7 @@ Run these after install to confirm the runtime is ready:
 ```bash
 make smoke-openvoice
 make smoke-e2e
+make smoke-qwen3     # only if you ran make setup-qwen3
 make test-pyvt
 ```
 
@@ -201,6 +212,64 @@ make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 \
      TTS_ENGINE=openvoice VERIFY_PITCH=1
 ```
 
+#### Where the text comes from: subtitles vs. ASR
+
+The split pipeline needs two things from the source: **what** was said
+and **when**. There are two sources for that, and they are not
+interchangeable:
+
+- **Embedded subtitles** give text + timing, but never tell you **who**
+  spoke. A subtitle cue has no speaker identity.
+- **ASR (whisper)** transcribes the audio and gives text + timing, also
+  without speaker identity.
+
+Speaker identity (**who**) always comes from **audio diarization**
+(`analyze_speakers.py`), which is then aligned to the text cues by
+timestamp overlap. So the full pipeline is:
+
+```
+video
+  -> find embedded subtitles          (ffprobe -select_streams s)
+  -> extract subtitle cues + timing   (ffmpeg -map 0:s:k -> source.srt)
+  -> translate cues                   (STS -> translated.srt)
+  -> diarize speakers from audio      (pyannote -> speaker turns)
+  -> align cue timestamps to speakers (overlap match)
+  -> build per-speaker profiles       (gender/age/pitch + reference.wav)
+  -> voice-clone TTS per cue          (reference -> English WAV)
+  -> place WAVs back on the timeline
+  -> mix/remux final video
+```
+
+By default the split pipeline runs whisper ASR to produce the source
+SRT. Add `PREFER_EMBEDDED_SUBTITLES=1` to use an embedded subtitle
+stream as the text+timing source instead, skipping ASR when one is
+found:
+
+```bash
+make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 \
+     SPEAKER_PROFILING=1 PREFER_EMBEDDED_SUBTITLES=1 \
+     TTS_ENGINE=openvoice
+```
+
+`scripts/extract_embedded_subtitles.py` handles stream discovery and
+extraction:
+
+- Lists subtitle streams with `ffprobe -select_streams s`.
+- Prefers a text-based stream (`subrip`/`ass`/`mov_text`/`webvtt`)
+  whose language tag matches `--source-language`, then any text-based
+  stream.
+- Extracts it to `job/subtitles/source.srt` via `ffmpeg -map 0:s:k
+  -c:s srt`.
+- If only image-based subtitles are present (PGS/VobSub), attempts OCR
+  (`pgs-to-srt` / `vobsub2srt`). If the OCR tool is missing or fails,
+  falls back to whisper ASR. Add `NO_OCR_IMAGE_SUBS=1` to skip OCR and
+  go straight to ASR.
+- If no usable subtitle stream is found at all, falls back to whisper
+  ASR. Embedded subtitles are an optimization, never a hard requirement.
+
+The chosen source is recorded in `job.json` as `subtitle_source`
+(`embedded_text`, `embedded_ocr`, or `asr`).
+
 This runs `scripts/analyze_speakers.py` before the dub, producing:
 
 - `job/speakers/speaker_profiles.json` — per-speaker gender, age band,
@@ -255,8 +324,8 @@ The wrapper supports three TTS engines via `--tts-engine`:
 | Engine | Provider | Description |
 |--------|----------|-------------|
 | `openvoice` | 34 | OpenVoice V2 local voice cloning (default) |
-| `qwen3-local` | 1 | Qwen3-TTS local built-in |
-| `omnivoice` | 2 | OmniVoice local API |
+| `qwen3-local` | 1 | Qwen3-TTS local built-in (Apple Silicon, MLX) |
+| `omnivoice` | 2 | OmniVoice local API (no bridge yet — not supported in split mode) |
 
 ```bash
 make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 TTS_ENGINE=qwen3-local
@@ -264,13 +333,37 @@ make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 TTS_ENGINE=qwen3-local
 
 A fallback engine can be configured with `--fallback-tts-engine`. If the
 primary engine fails (nonzero exit), the wrapper retries with the
-fallback. Qwen3-local and OmniVoice require their own setup scripts (not
-yet wired); `make doctor` reports which engines are ready.
+fallback. `make doctor` reports which engines are ready.
 
 ```bash
 make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 \
      TTS_ENGINE=qwen3-local FALLBACK_TTS_ENGINE=openvoice
 ```
+
+#### Qwen3-local setup (independent of OpenVoice)
+
+Qwen3-local runs on the same python that runs `run_personal_dub.py`
+(`sys.executable`), NOT the OpenVoice or pyVideoTrans venvs. It is
+intentionally independent of OpenVoice — you do **not** need OpenVoice
+checkpoints installed to use `--tts-engine qwen3-local`.
+
+```bash
+make setup-qwen3      # installs mlx-audio + soundfile + librosa + model
+make doctor-qwen3     # probes imports + model presence
+make smoke-qwen3      # generates one real segment — the proof
+```
+
+The default model is `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16`,
+which includes the `speech_tokenizer/` subdir required by mlx-audio's
+`post_load_hook`. **Do not** use the `aufklarer/...-MLX-4bit` repo —
+it is the Base talker only and is missing the speech tokenizer, so
+`model.generate()` fails with `ValueError: Speech tokenizer not loaded`.
+
+`make smoke-qwen3` is the real proof: it loads the model, clones the
+default reference voice, writes a 24 kHz WAV, and checks it is
+non-empty and non-silent. The Qwen3 bridge API (`load_model` →
+`model.generate(text, ref_audio, ref_text, ...)` → `results[0].audio`)
+is validated by this smoke test on each Mac before use.
 
 ### Job directory safety
 

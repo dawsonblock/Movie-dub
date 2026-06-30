@@ -1,4 +1,4 @@
-.PHONY: doctor doctor-strict doctor-demucs doctor-checkpoints doctor-qwen3 setup-ffmpeg setup-pyvt setup-openvoice setup-qwen3 setup-checkpoints download-openvoice smoke-openvoice smoke-qwen3 smoke-e2e test-openvoice test-pyvt dub proof proof-report generate-voices analyze-speakers verify-pitch clean
+.PHONY: doctor doctor-strict doctor-demucs doctor-checkpoints doctor-qwen3 setup-ffmpeg setup-pyvt setup-openvoice setup-qwen3 setup-checkpoints download-openvoice smoke-openvoice smoke-qwen3 smoke-e2e test test-unit test-openvoice test-pyvt dub proof proof-report generate-voices analyze-speakers verify-pitch clean
 
 doctor:
 	python3 scripts/doctor.py
@@ -102,6 +102,12 @@ smoke-qwen3:
 
 smoke-e2e:
 	python3 scripts/smoke_e2e_short_clip.py
+
+# Run the full pytest unit test suite (tests/ dir). Fast — no model deps.
+test: test-unit
+
+test-unit:
+	python3 -m pytest tests/ -q
 
 test-openvoice:
 	cd pyvideotrans-main && .venv/bin/python -m pytest tests/test_openvoice_bridge.py -q
@@ -344,15 +350,13 @@ doctor-age:
 	@if [ ! -d .venv-age ]; then \
 		echo "FAIL: .venv-age missing. Run: make setup-age"; exit 1; \
 	fi
-	@. .venv-age/bin/activate && python - <<'PY'
-from pathlib import Path
-from age_regressor import AgeRegressionPipeline
-model_path = Path("models/age_reg_ann_ecapa_librosa_combined")
-if not model_path.exists():
-    raise SystemExit("FAIL: model dir missing: " + str(model_path) + "\nRun: make setup-age")
-AgeRegressionPipeline.from_pretrained(str(model_path))
-print("Age model OK: " + str(model_path))
-PY
+	@. .venv-age/bin/activate && python -c "\
+from pathlib import Path;\
+from age_regressor import AgeRegressionPipeline;\
+model_path = Path('models/age_reg_ann_ecapa_librosa_combined');\
+assert model_path.exists(), 'FAIL: model dir missing: ' + str(model_path);\
+AgeRegressionPipeline.from_pretrained(str(model_path));\
+print('Age model OK: ' + str(model_path))"
 
 # Smoke-test the age model on a reference WAV. Writes tmp/smoke_age.json.
 # Usage: make smoke-age [AUDIO=voices/male_reference.wav] [MODEL_PATH=models/...]

@@ -4,11 +4,31 @@ Build/test commands and conventions learned while working in this repo.
 
 ## Verification commands
 
+- **Unit tests:** `make test` or `python3 -m pytest tests/ -q` (215 tests, ~2s, no model deps)
 - **Lint:** `ruff check scripts/` (must be clean; repo history shows lint fixes are expected)
 - **Doctor:** `python3 scripts/doctor.py` → must print `READY: yes` with 0 required failures
 - **E2E smoke:** `python3 scripts/smoke_e2e_short_clip.py` (needs OpenVoice checkpoints; ~minutes)
 - **Age model status:** `python3 scripts/age_model.py` (exit 1 = unavailable, falls back to heuristic)
 - **Syntax check a script:** `python3 -c "import ast; ast.parse(open('scripts/x.py').read())"`
+
+## Test suite
+
+Tests live in `tests/` and use pytest. `conftest.py` adds `scripts/` to
+`sys.path`. No third-party deps beyond pytest itself (the age model is mocked).
+
+- `test_age_model.py` — band mapping, source resolution, fallback, singleton
+- `test_cache.py` — hash determinism, cache key sensitivity, SegmentCache
+  round-trip + tamper detection, ResumePlan all modes, parse_from_stage aliases
+- `test_character_profiles.py` — build, idempotency (name/lock/review
+  preservation), mutations (rename/lock/unlock/set-review), schema validation
+- `test_review_loop.py` — failed_segments merging from 3 sources, dedup,
+  speaker/reference changes, shorten_text edge cases
+- `test_benchmark.py` — collect_metrics from fixture job dir, quality score,
+  percentile helper
+- `test_estimate_speaker_age.py` — age_band, mocked estimate_age, CLI
+  validation, output writing
+- `test_pipeline_flags.py` — argparse wiring (subprocess --help) for all
+  pipeline scripts
 
 ## Architecture
 

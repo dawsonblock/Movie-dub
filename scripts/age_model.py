@@ -11,12 +11,11 @@ Real model (optional plugin):
     embedding + ANN regressor trained on VoxCeleb2 + TIMIT. Test MAE ~6.93
     years. Installed via::
 
-        pip install git+https://github.com/griko/voice-age-regression.git \\
-            #egg=voice-age-regressor[full]
+        pip install "voice-age-regressor[full] @ git+https://github.com/griko/voice-age-regression.git"
 
     Usage::
 
-        from age_regressor import AgeRegressionPipeline
+        from voice_age_regressor import AgeRegressionPipeline
         regressor = AgeRegressionPipeline.from_pretrained(
             "griko/age_reg_ann_ecapa_librosa_combined"
         )
@@ -79,16 +78,16 @@ def _try_load_regressor(source: str) -> Any | None:
     """Attempt to import and load the age regressor. Returns None on failure."""
     global _load_attempted, _load_error, _loaded_source
     try:
-        from age_regressor import AgeRegressionPipeline  # type: ignore
+        from voice_age_regressor import AgeRegressionPipeline  # type: ignore
     except Exception as exc:  # noqa: BLE001 - any import failure is recoverable
-        _load_error = f"age_regressor import failed: {exc}"
+        _load_error = f"voice_age_regressor import failed: {exc}"
         return None
     try:
         reg = AgeRegressionPipeline.from_pretrained(source)
         _loaded_source = source
         return reg
     except Exception as exc:  # noqa: BLE001
-        _load_error = f"age_regressor load failed ({source}): {exc}"
+        _load_error = f"voice_age_regressor load failed ({source}): {exc}"
         return None
 
 
@@ -250,7 +249,7 @@ def estimate_age(
         if use_model == "on":
             raise RuntimeError(
                 f"age model requested (--age-model on) but unavailable: "
-                f"{last_load_error() or 'age_regressor not installed'}. "
+                f"{last_load_error() or 'voice_age_regressor not installed'}. "
                 f"Run `make setup-age` to install the plugin and download "
                 f"the model into models/ (gitignored)."
             )
@@ -300,7 +299,7 @@ def estimate_age(
         "estimated_years": round(years, 1),
         "confidence": conf,
         "source": "model",
-        "method": DEFAULT_AGE_MODEL_REPO,
+        "method": loaded_source() or DEFAULT_AGE_MODEL_REPO,
         "note": "Apparent vocal age estimate; not exact biological age.",
     }
 

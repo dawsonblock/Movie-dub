@@ -62,6 +62,10 @@ class TestRunPersonalDubFlags:
         out = _help_flags("run_personal_dub.py")
         assert "--skip-existing" in out
 
+    def test_no_cache_flag(self):
+        out = _help_flags("run_personal_dub.py")
+        assert "--no-cache" in out
+
 
 class TestAnalyzeSpeakersFlags:
     def test_age_model_flag(self):

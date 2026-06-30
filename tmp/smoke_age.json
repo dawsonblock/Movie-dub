@@ -1,0 +1,7 @@
+{
+  "estimated_years": 33.9,
+  "band": "young_adult",
+  "method": "models/age_reg_ann_ecapa_librosa_combined",
+  "confidence": null,
+  "note": "Apparent vocal age estimate; not exact biological age."
+}

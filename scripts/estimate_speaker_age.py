@@ -57,7 +57,7 @@ def age_band(age: float) -> str:
 
 def estimate_age(audio_path: Path, model_path: str | None = None) -> dict:
     """Run the trained regressor on one WAV. Raises on failure (no fallback)."""
-    from age_regressor import AgeRegressionPipeline
+    from voice_age_regressor import AgeRegressionPipeline
 
     source = model_path or DEFAULT_AGE_MODEL_REPO
     regressor = AgeRegressionPipeline.from_pretrained(source)

@@ -173,7 +173,7 @@ verify-pitch:
 
 # Personal dubbing wrapper. Usage:
 #   make dub INPUT=~/Movies/test.mp4 OUTPUT=~/Movies/dubbed-test.mp4
-# Optional: SOURCE=auto TARGET=en GENDER=auto MODEL=whisper-large-v3-turbo
+# Optional: SOURCE_LANG=auto TARGET_LANG=en GENDER=auto ASR_MODEL=whisper-large-v3-turbo
 #           BACKGROUND_VOLUME=0.15 VOICE_VOLUME=1.2 VOCAL_SEPARATION=1
 #           VOCAL_SEPARATION_METHOD=demucs DUCKING=1 TARGET_LUFS=-16
 #           NO_NORMALIZE=1 FINAL_GAIN=1.0
@@ -183,10 +183,11 @@ verify-pitch:
 #           TTS_ENGINE=openvoice FALLBACK_TTS_ENGINE=none
 #           VERIFY_PITCH=1 FAIL_ON_PITCH_MISMATCH=1
 #           PREFER_EMBEDDED_SUBTITLES=1 (NO_OCR_IMAGE_SUBS=1 to skip OCR)
+#           RESUME=1 FROM_STAGE=tts ONLY_SEGMENT=42 SKIP_EXISTING=1 NO_CACHE=1
 dub:
 	@if [ -z "$(INPUT)" ] || [ -z "$(OUTPUT)" ]; then \
 		echo "Usage: make dub INPUT=<input.mp4> OUTPUT=<output.mp4>"; \
-		echo "  SOURCE=auto TARGET=en GENDER=auto MODEL=whisper-large-v3-turbo"; \
+		echo "  SOURCE_LANG=auto TARGET_LANG=en GENDER=auto ASR_MODEL=whisper-large-v3-turbo"; \
 		echo "  BACKGROUND_VOLUME=0.15 VOCAL_SEPARATION=1 VOCAL_SEPARATION_METHOD=ffmpeg"; \
 		echo "  For AI separation: VOCAL_SEPARATION_METHOD=demucs ALLOW_DEMUCS_DOWNLOAD=1"; \
 		echo "  DUCKING=1"; \
@@ -197,9 +198,9 @@ dub:
 	fi
 	python3 scripts/run_personal_dub.py \
 		--input "$(INPUT)" \
-		--source-language $(or $(SOURCE),auto) \
-		--target-language $(or $(TARGET),en) \
-		--model $(or $(MODEL),openai/whisper-large-v3-turbo) \
+		--source-language $(or $(SOURCE_LANG),auto) \
+		--target-language $(or $(TARGET_LANG),en) \
+		--model $(or $(ASR_MODEL),openai/whisper-large-v3-turbo) \
 		$(if $(GENDER),--gender $(GENDER)) \
 		$(if $(REFERENCE),--reference $(REFERENCE)) \
 		--output "$(OUTPUT)" \
@@ -235,7 +236,8 @@ dub:
 		$(if $(RESUME),--resume) \
 		$(if $(FROM_STAGE),--from-stage $(FROM_STAGE)) \
 		$(if $(ONLY_SEGMENT),--only-segment $(ONLY_SEGMENT)) \
-		$(if $(SKIP_EXISTING),--skip-existing)
+		$(if $(SKIP_EXISTING),--skip-existing) \
+		$(if $(NO_CACHE),--no-cache)
 
 # Build character_profiles.json from speaker_profiles.json.
 # Usage: make character-profiles PROFILES=tmp/job/speakers/speaker_profiles.json \
@@ -252,26 +254,26 @@ character-profiles:
 		$(if $(TTS_ENGINE),--tts-engine $(TTS_ENGINE))
 
 # Rename / lock / review a character in character_profiles.json.
-# Usage: make character-rename FILE=<cp.json> CHAR_ID=CHAR_001 NAME="Alice"
-#        make character-lock FILE=<cp.json> CHAR_ID=CHAR_001 REF=voices/alice.wav
-#        make character-review FILE=<cp.json> CHAR_ID=CHAR_001 STATUS=approved
+# Usage: make character-rename PROFILE_FILE=<cp.json> CHAR_ID=CHAR_001 CHAR_NAME="Alice"
+#        make character-lock PROFILE_FILE=<cp.json> CHAR_ID=CHAR_001 REF=voices/alice.wav
+#        make character-review PROFILE_FILE=<cp.json> CHAR_ID=CHAR_001 STATUS=approved
 character-rename:
-	@if [ -z "$(FILE)" ] || [ -z "$(CHAR_ID)" ] || [ -z "$(NAME)" ]; then \
-		echo "Usage: make character-rename FILE=<cp.json> CHAR_ID=CHAR_001 NAME=\"Alice\""; exit 1; \
+	@if [ -z "$(PROFILE_FILE)" ] || [ -z "$(CHAR_ID)" ] || [ -z "$(CHAR_NAME)" ]; then \
+		echo "Usage: make character-rename PROFILE_FILE=<cp.json> CHAR_ID=CHAR_001 CHAR_NAME=\"Alice\""; exit 1; \
 	fi
-	python3 scripts/character_profiles.py --rename $(CHAR_ID) "$(NAME)" --output "$(FILE)"
+	python3 scripts/character_profiles.py --rename $(CHAR_ID) "$(CHAR_NAME)" --output "$(PROFILE_FILE)"
 
 character-lock:
-	@if [ -z "$(FILE)" ] || [ -z "$(CHAR_ID)" ] || [ -z "$(REF)" ]; then \
-		echo "Usage: make character-lock FILE=<cp.json> CHAR_ID=CHAR_001 REF=<wav>"; exit 1; \
+	@if [ -z "$(PROFILE_FILE)" ] || [ -z "$(CHAR_ID)" ] || [ -z "$(REF)" ]; then \
+		echo "Usage: make character-lock PROFILE_FILE=<cp.json> CHAR_ID=CHAR_001 REF=<wav>"; exit 1; \
 	fi
-	python3 scripts/character_profiles.py --lock-voice $(CHAR_ID) $(REF) --output "$(FILE)"
+	python3 scripts/character_profiles.py --lock-voice $(CHAR_ID) $(REF) --output "$(PROFILE_FILE)"
 
 character-review:
-	@if [ -z "$(FILE)" ] || [ -z "$(CHAR_ID)" ] || [ -z "$(STATUS)" ]; then \
-		echo "Usage: make character-review FILE=<cp.json> CHAR_ID=CHAR_001 STATUS=approved"; exit 1; \
+	@if [ -z "$(PROFILE_FILE)" ] || [ -z "$(CHAR_ID)" ] || [ -z "$(STATUS)" ]; then \
+		echo "Usage: make character-review PROFILE_FILE=<cp.json> CHAR_ID=CHAR_001 STATUS=approved"; exit 1; \
 	fi
-	python3 scripts/character_profiles.py --set-review $(CHAR_ID) $(STATUS) --output "$(FILE)"
+	python3 scripts/character_profiles.py --set-review $(CHAR_ID) $(STATUS) --output "$(PROFILE_FILE)"
 
 # Regenerate one segment from a review job.
 # Usage: make regenerate JOB=tmp/personal_dub/<id> SEGMENT=12 REMUX=1 \
@@ -302,17 +304,17 @@ failed-segments:
 		--output "$(JOB)/failed_segments.json"
 
 # Re-assign a segment (or all segments of a speaker) to a new speaker.
-# Usage: make change-speaker JOB=<job> TO=SPEAKER_01 [SEGMENT=12] [FROM=SPEAKER_00]
+# Usage: make change-speaker JOB=<job> TO_SPEAKER=SPEAKER_01 [SEGMENT=12] [FROM_SPEAKER=SPEAKER_00]
 change-speaker:
-	@if [ -z "$(JOB)" ] || [ -z "$(TO)" ]; then \
-		echo "Usage: make change-speaker JOB=<job> TO=SPEAKER_01 [SEGMENT=12] [FROM=SPEAKER_00]"; exit 1; \
+	@if [ -z "$(JOB)" ] || [ -z "$(TO_SPEAKER)" ]; then \
+		echo "Usage: make change-speaker JOB=<job> TO_SPEAKER=SPEAKER_01 [SEGMENT=12] [FROM_SPEAKER=SPEAKER_00]"; exit 1; \
 	fi
 	python3 scripts/review_loop.py change-speaker \
 		--review "$(JOB)/review_segments.json" \
 		--speaker-profiles "$(JOB)/speakers/speaker_profiles.json" \
-		--to-speaker $(TO) \
+		--to-speaker $(TO_SPEAKER) \
 		$(if $(SEGMENT),--segment-id $(SEGMENT)) \
-		$(if $(FROM),--from-speaker $(FROM))
+		$(if $(FROM_SPEAKER),--from-speaker $(FROM_SPEAKER))
 
 # Repeatable benchmark harness. Runs the full pipeline on a clip and writes
 # a metrics report. Supply your own 5-10 min clip.
@@ -329,9 +331,9 @@ benchmark:
 	python3 scripts/benchmark.py \
 		--input "$(INPUT)" \
 		--output-dir "$(OUTPUT_DIR)" \
-		--name $(or $(NAME),bench) \
-		--target-language $(or $(TARGET),en) \
-		--source-language $(or $(SOURCE),auto) \
+		--name $(or $(RUN_NAME),bench) \
+		--target-language $(or $(TARGET_LANG),en) \
+		--source-language $(or $(SOURCE_LANG),auto) \
 		--tts-engine $(or $(TTS_ENGINE),openvoice) \
 		$(if $(SPEAKER_PROFILING),--speaker-profiling) \
 		$(if $(DIARIZATION),--diarization $(DIARIZATION)) \
@@ -372,7 +374,7 @@ doctor-age:
 	fi
 	@. .venv-age/bin/activate && python -c "\
 from pathlib import Path;\
-from age_regressor import AgeRegressionPipeline;\
+from voice_age_regressor import AgeRegressionPipeline;\
 model_path = Path('models/age_reg_ann_ecapa_librosa_combined');\
 assert model_path.exists(), 'FAIL: model dir missing: ' + str(model_path);\
 AgeRegressionPipeline.from_pretrained(str(model_path));\

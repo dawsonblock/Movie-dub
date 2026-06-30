@@ -424,7 +424,7 @@ def collect_checks(
         check("Speaker", "age regression venv + model", age_model_available,
               age_model_detail, required=False)
     )
-    # Also check the in-process plugin (only loads if age_regressor is
+    # Also check the in-process plugin (only loads if voice_age_regressor is
     # importable from the current interpreter, which it usually isn't outside
     # .venv-age). This is informational; the venv+model check above is the
     # real readiness gate.

@@ -128,9 +128,10 @@ The OpenVoice provider is registered in pyVideoTrans as provider `34`, displayed
 
 ## Unit Tests
 
-The `tests/` directory contains 215 pytest tests for the v0.12 modules (age
-model, cache/resume, character profiles, review loop, benchmark, CLI wiring).
-They run in ~2s and need no model dependencies.
+The `tests/` directory contains 238 pytest tests for the v0.12 modules (age
+model, cache/resume, character profiles, review loop, benchmark, CLI wiring,
+cache-wiring integration, voice-lock routing).
+They are lightweight and need no model dependencies.
 
 ```bash
 # One-time: install pytest + ruff
@@ -166,7 +167,7 @@ Optional flags:
 
 ```bash
 make dub INPUT=~/Movies/test.mp4 OUTPUT=~/Movies/dubbed-test.mp4 \
-     SOURCE=en TARGET=en REFERENCE=voices/openvoice_default_reference.wav \
+     SOURCE_LANG=en TARGET_LANG=en REFERENCE=voices/openvoice_default_reference.wav \
      BACKGROUND_VOLUME=0.15 VOICE_VOLUME=1.2
 ```
 
@@ -532,9 +533,9 @@ make character-profiles PROFILES=<job>/speakers/speaker_profiles.json \
      OUTPUT=<job>/character_profiles.json TTS_ENGINE=qwen3-local
 
 # Rename, lock a voice, mark review status (idempotent — preserves edits)
-make character-rename FILE=<job>/character_profiles.json CHAR_ID=CHAR_001 NAME="Alice"
-make character-lock FILE=<job>/character_profiles.json CHAR_ID=CHAR_001 REF=voices/alice.wav
-make character-review FILE=<job>/character_profiles.json CHAR_ID=CHAR_001 STATUS=approved
+make character-rename PROFILE_FILE=<job>/character_profiles.json CHAR_ID=CHAR_001 CHAR_NAME="Alice"
+make character-lock PROFILE_FILE=<job>/character_profiles.json CHAR_ID=CHAR_001 REF=voices/alice.wav
+make character-review PROFILE_FILE=<job>/character_profiles.json CHAR_ID=CHAR_001 STATUS=approved
 ```
 
 Schema: `character_id`, `speaker_id`, `name`, `gender`, `age_band`,
@@ -543,11 +544,21 @@ Schema: `character_id`, `speaker_id`, `name`, `gender`, `age_band`,
 preserves user-set names, locks, and review status by matching on
 `speaker_id`.
 
+A **locked voice** (`voice_locked: true` + `voice_reference`) is the routing
+authority for TTS: it overrides the speaker profile's `reference_audio` when
+building the TTS queue. Lock a character's voice to pin it to a specific
+reference WAV across re-runs, even if speaker profiling re-extracts a
+different reference clip.
+
 ### Cache and resume
 
-Every stage is resumable. TTS segments are skipped when their output WAV
-already exists, so changing one line regenerates one line, not the whole
-movie.
+Every stage is resumable. The split pipeline uses a **hash-based segment
+cache**: each TTS segment's cache key is derived from the source audio hash,
+subtitle hash, speaker profile hash, translated text, TTS engine + model,
+reference voice hash, language, and rate/volume/pitch. If none of those
+inputs changed since the last run of the same job, the cached WAV is reused
+and the bridge is skipped. Changing one line's text invalidates only that
+segment — not the whole movie.
 
 ```bash
 # Resume the most recent job, skipping stages already marked pass
@@ -561,12 +572,17 @@ make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 ONLY_SEGMENT=42
 
 # Skip any segment whose output WAV already exists (incremental)
 make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 SKIP_EXISTING=1
+
+# Disable the hash-based cache (force full TTS regeneration)
+make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 NO_CACHE=1
 ```
 
 `--resume` reuses the most recent job dir (or `--job-dir`); `--from-stage`
 skips earlier stages; `--only-segment` runs TTS for one segment then
 rebuilds; `--skip-existing` drops segments with existing output WAVs and
-merges regenerated results back into the manifest.
+merges regenerated results back into the manifest. The hash-based cache is
+on by default; `--no-cache` disables it. Cache state lives at
+`<job_dir>/cache/segment_cache.json`.
 
 ### Better reference clip selection
 
@@ -601,7 +617,7 @@ make regenerate JOB=<job_dir> SEGMENT=12 REMUX=1 CHANGE_REF=voices/alice.wav
 make regenerate JOB=<job_dir> SEGMENT=12 REMUX=1 SHORTEN=1
 
 # Re-assign a whole speaker's segments to a new speaker, then regenerate
-make change-speaker JOB=<job_dir> FROM=SPEAKER_00 TO=SPEAKER_02
+make change-speaker JOB=<job_dir> FROM_SPEAKER=SPEAKER_00 TO_SPEAKER=SPEAKER_02
 ```
 
 `regenerate_segment.py` now supports `--tts-engine qwen3-local` (not just

@@ -20,23 +20,23 @@ from estimate_speaker_age import age_band, estimate_age, main
 
 @pytest.fixture
 def mock_age_regressor():
-    """Inject a fake age_regressor module into sys.modules for the test."""
+    """Inject a fake voice_age_regressor module into sys.modules for the test."""
     mock_pipeline = MagicMock()
     mock_pipeline.return_value = [42.0]
     mock_cls = MagicMock()
     mock_cls.from_pretrained.return_value = mock_pipeline
 
-    fake_module = types.ModuleType("age_regressor")
+    fake_module = types.ModuleType("voice_age_regressor")
     fake_module.AgeRegressionPipeline = mock_cls
-    old = sys.modules.get("age_regressor")
-    sys.modules["age_regressor"] = fake_module
+    old = sys.modules.get("voice_age_regressor")
+    sys.modules["voice_age_regressor"] = fake_module
     try:
         yield mock_cls, mock_pipeline
     finally:
         if old is not None:
-            sys.modules["age_regressor"] = old
+            sys.modules["voice_age_regressor"] = old
         else:
-            sys.modules.pop("age_regressor", None)
+            sys.modules.pop("voice_age_regressor", None)
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +152,7 @@ class TestCliMain:
         audio = tmp_path / "test.wav"
         audio.write_bytes(b"fake audio")
         output = tmp_path / "out.json"
-        # Don't mock — the real import will fail since age_regressor isn't installed
+        # Don't mock — the real import will fail since voice_age_regressor isn't installed
         monkeypatch.setattr(sys, "argv", [
             "estimate_speaker_age.py",
             "--audio", str(audio),

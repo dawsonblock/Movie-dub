@@ -50,7 +50,7 @@ echo "==> Upgrading pip / wheel / setuptools"
 python -m pip install --upgrade pip wheel setuptools
 
 echo "==> Installing voice-age-regression[full]"
-python -m pip install "git+https://github.com/griko/voice-age-regression.git#egg=voice-age-regressor[full]"
+python -m pip install "voice-age-regressor[full] @ git+https://github.com/griko/voice-age-regression.git"
 
 echo "==> Installing huggingface_hub soundfile librosa"
 python -m pip install huggingface_hub soundfile librosa
@@ -69,7 +69,7 @@ fi
 echo "==> Verifying the model loads"
 python - <<'PY'
 from pathlib import Path
-from age_regressor import AgeRegressionPipeline
+from voice_age_regressor import AgeRegressionPipeline
 model_path = Path("models/age_reg_ann_ecapa_librosa_combined")
 if not model_path.exists():
     raise SystemExit("Model dir missing after download: " + str(model_path))

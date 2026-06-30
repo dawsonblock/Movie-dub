@@ -59,7 +59,11 @@ from job_state import (
 )
 from cache import (
     ResumePlan,
+    SegmentCache,
+    content_hash,
+    dict_hash,
     parse_from_stage,
+    segment_cache_key,
 )
 from character_profiles import (
     build_character_profiles as _build_character_profiles,
@@ -296,6 +300,26 @@ def parse_srt_to_segments(srt_path: Path) -> list[dict]:
     return segments
 
 
+def _locked_voice_overrides(
+    character_profiles: dict | None,
+) -> dict[str, str]:
+    """Build a speaker_id -> voice_reference map for locked characters.
+
+    A character with ``voice_locked=True`` and a non-empty ``voice_reference``
+    overrides the speaker profile's reference_audio. This is how a user-locked
+    voice in character_profiles.json drives TTS routing.
+    """
+    if not character_profiles:
+        return {}
+    overrides: dict[str, str] = {}
+    for ch in character_profiles.get("characters", []):
+        if ch.get("voice_locked") and ch.get("voice_reference"):
+            sid = ch.get("speaker_id", "")
+            if sid:
+                overrides[sid] = ch["voice_reference"]
+    return overrides
+
+
 def build_queue_tts_with_speakers(
     translated_srt: Path,
     speaker_profiles: dict,
@@ -305,6 +329,7 @@ def build_queue_tts_with_speakers(
     volume: str = "+0%",
     pitch: str = "+0Hz",
     language: str = "en",
+    character_profiles: dict | None = None,
 ) -> list[dict]:
     """Build a queue_tts list with per-speaker ref_wav from speaker profiles.
 
@@ -316,12 +341,19 @@ def build_queue_tts_with_speakers(
       - start_time / end_time: in milliseconds (pyVideoTrans convention)
       - filename: output WAV path in cache_folder
       - tts_type, rate, volume, pitch
+
+    If ``character_profiles`` is provided, any character with
+    ``voice_locked=True`` and a ``voice_reference`` overrides the speaker
+    profile's ``reference_audio``. This is how a user-locked voice in
+    character_profiles.json drives TTS routing.
     """
     segments = parse_srt_to_segments(translated_srt)
     seg_assignments = speaker_profiles.get("segment_assignments", [])
     profiles_by_id = {
         p["speaker_id"]: p for p in speaker_profiles.get("speakers", [])
     }
+    # Locked-voice overrides from character_profiles.json (v0.12).
+    voice_overrides = _locked_voice_overrides(character_profiles)
     # Build segment_index -> speaker_id map
     seg_to_speaker: dict[int, str] = {}
     for sa in seg_assignments:
@@ -332,7 +364,8 @@ def build_queue_tts_with_speakers(
         idx = seg["segment_index"]
         speaker_id = seg_to_speaker.get(idx, "")
         profile = profiles_by_id.get(speaker_id, {})
-        ref_wav = profile.get("reference_audio", "")
+        # A locked character voice overrides the speaker profile's reference.
+        ref_wav = voice_overrides.get(speaker_id) or profile.get("reference_audio", "")
         if not ref_wav or not Path(ref_wav).is_file():
             raise RuntimeError(
                 f"segment {idx}: speaker '{speaker_id}' has no reference_audio "
@@ -361,6 +394,58 @@ def build_queue_tts_with_speakers(
             "openvoice_output": f"{cache_folder}/dubb-{idx}-{_key}.wav-openvoice.wav",
         })
     return queue
+
+
+def _tts_model_id(engine: str, args) -> str:
+    """Return a stable model identifier for cache keying."""
+    if engine == "qwen3-local":
+        return args.qwen3_model
+    return "openvoice-v2"
+
+
+def _compute_segment_cache_keys(
+    queue_tts: list[dict],
+    *,
+    source_audio_hash: str,
+    subtitle_hash: str,
+    speaker_profile_hash: str,
+    tts_engine: str,
+    tts_model: str,
+    language: str,
+) -> dict[str, str]:
+    """Compute a deterministic cache key for each queue item.
+
+    Returns a mapping of ``str(line) -> cache_key``. Reference audio is hashed
+    per-unique-path (cached to avoid re-reading the same file).
+    """
+    ref_hash_cache: dict[str, str] = {}
+
+    def _ref_hash(path_str: str) -> str:
+        if path_str not in ref_hash_cache:
+            p = Path(path_str)
+            ref_hash_cache[path_str] = (
+                content_hash(p) if p.is_file() else "missing"
+            )
+        return ref_hash_cache[path_str]
+
+    keys: dict[str, str] = {}
+    for item in queue_tts:
+        line = str(item.get("line", item.get("id", "")))
+        ref = item.get("ref_wav") or item.get("voice_reference") or ""
+        keys[line] = segment_cache_key(
+            source_audio_hash=source_audio_hash,
+            subtitle_hash=subtitle_hash,
+            speaker_profile_hash=speaker_profile_hash,
+            translated_text=item.get("text", ""),
+            tts_engine=tts_engine,
+            tts_model=tts_model,
+            reference_audio_hash=_ref_hash(ref),
+            language=language,
+            voice_rate=item.get("rate", "+0%"),
+            volume=item.get("volume", "+0%"),
+            pitch=item.get("pitch", "+0Hz"),
+        )
+    return keys
 
 
 def latest_manifest(start_time: float) -> Path | None:
@@ -664,6 +749,12 @@ def main() -> int:
     parser.add_argument("--skip-existing", action="store_true",
                         help="skip TTS segments whose output WAV already exists "
                              "(incremental regeneration)")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="disable the hash-based segment TTS cache. By "
+                             "default, segments whose inputs (source audio, "
+                             "subtitle, speaker profile, translated text, TTS "
+                             "engine/model, reference voice) are unchanged are "
+                             "reused from a previous run of the same job.")
     args = parser.parse_args()
 
     input_video = Path(args.input).expanduser().resolve()
@@ -1275,6 +1366,13 @@ def main() -> int:
             cache_folder = job_dir / "tts_cache"
         cache_folder.mkdir(parents=True, exist_ok=True)
 
+        # Load character profiles for voice-lock routing. A locked voice in
+        # character_profiles.json overrides the speaker profile's
+        # reference_audio during queue building (v0.12).
+        cp_for_routing: dict | None = None
+        if character_profiles_path.is_file():
+            cp_for_routing = _load_character_profiles(character_profiles_path)
+
         tts_provider_int = int(TTS_ENGINE_MAP[args.tts_engine])
         queue_tts = build_queue_tts_with_speakers(
             translated_srt=job_srt,
@@ -1282,15 +1380,70 @@ def main() -> int:
             cache_folder=cache_folder,
             tts_type=tts_provider_int,
             language=args.target_language,
+            character_profiles=cp_for_routing,
         )
         if not queue_tts:
             update_job_stage(job_json_path, "tts", "fail")
             return die("no TTS queue items built from translated SRT + speaker profiles")
         print(f"Built {len(queue_tts)} TTS queue items with per-speaker ref_wav")
 
+        # --- Hash-based segment cache (v0.12) ---
+        # Segments whose inputs (source audio, subtitle, speaker profile,
+        # translated text, TTS engine/model, reference voice) are unchanged
+        # are reused from a previous run of the same job. This is stronger
+        # than --skip-existing (which only checks file existence): changing
+        # one segment's text invalidates only that segment, not all.
+        seg_cache: SegmentCache | None = None
+        cache_keys: dict[str, str] = {}
+        cache_hit_ids: set[str] = set()
+        if not args.no_cache:
+            seg_cache = SegmentCache(job_dir / "cache")
+            try:
+                source_audio_hash = content_hash(input_video)
+            except Exception:
+                source_audio_hash = "unknown"
+            try:
+                subtitle_hash = content_hash(source_srt) if (source_srt and source_srt.is_file()) else "none"
+            except Exception:
+                subtitle_hash = "none"
+            speaker_profile_hash = dict_hash(speaker_profiles_data)
+            tts_model_id = _tts_model_id(args.tts_engine, args)
+            cache_keys = _compute_segment_cache_keys(
+                queue_tts,
+                source_audio_hash=source_audio_hash,
+                subtitle_hash=subtitle_hash,
+                speaker_profile_hash=speaker_profile_hash,
+                tts_engine=args.tts_engine,
+                tts_model=tts_model_id,
+                language=args.target_language,
+            )
+            # Check each segment for a cache hit. On hit, copy the cached WAV
+            # to the expected filename so downstream code finds it.
+            for item in queue_tts:
+                seg_id = str(item.get("line", item.get("id", "")))
+                key = cache_keys.get(seg_id)
+                if not key:
+                    continue
+                entry = seg_cache.get(key)
+                if entry:
+                    cached_wav = Path(entry["output_wav"])
+                    dest = Path(item.get("filename", ""))
+                    if cached_wav.is_file() and dest != cached_wav:
+                        try:
+                            dest.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(cached_wav, dest)
+                        except Exception as exc:
+                            print(f"WARNING: cache copy failed for segment "
+                                  f"{seg_id}: {exc}", file=sys.stderr)
+                    cache_hit_ids.add(seg_id)
+            if cache_hit_ids:
+                print(f"Segment cache: {len(cache_hit_ids)} hit(s), "
+                      f"{len(queue_tts) - len(cache_hit_ids)} miss(es)")
+
         # --- Cache / resume: filter the queue to segments that need (re)gen ---
         # --skip-existing drops segments whose output WAV already exists.
         # --only-segment keeps just one segment id.
+        # Hash-based cache hits (above) are also skipped.
         # Filtered-out segments are not sent to the bridge; their existing
         # manifest entries are preserved and merged back after the run.
         full_queue = queue_tts
@@ -1305,6 +1458,8 @@ def main() -> int:
             seg_id = str(q_item.get("line", q_item.get("id", "")))
             if args.only_segment and seg_id != str(args.only_segment):
                 return False
+            if seg_id in cache_hit_ids:
+                return False
             if args.skip_existing:
                 out = Path(q_item.get("filename", ""))
                 if out.is_file() and out.stat().st_size > 0:
@@ -1314,9 +1469,9 @@ def main() -> int:
         queue_tts = [item for item in full_queue if _queue_filter(item)]
         skipped_count = len(full_queue) - len(queue_tts)
         if skipped_count > 0:
-            print(f"Skipping {skipped_count} segment(s) with existing output "
-                  f"(--skip-existing / --only-segment)")
-        if not queue_tts and existing_manifest_for_merge:
+            print(f"Skipping {skipped_count} segment(s) "
+                  f"(cache hit / --skip-existing / --only-segment)")
+        if not queue_tts and (existing_manifest_for_merge or cache_hit_ids):
             # Nothing to regenerate; reuse the existing manifest as-is.
             print("All segments already generated; reusing existing manifest.")
             update_job_stage(job_json_path, "tts", "pass")
@@ -1430,6 +1585,7 @@ def main() -> int:
                 cache_folder=cache_folder,
                 tts_type=fallback_provider_int,
                 language=args.target_language,
+                character_profiles=cp_for_routing,
             )
             bridge_result = _run_bridge(args.fallback_tts_engine, queue_tts)
             tts_engine_used = args.fallback_tts_engine
@@ -1520,6 +1676,30 @@ def main() -> int:
                 f"(--allow-partial accepted)"
             )
         update_job_stage(job_json_path, "tts", "pass")
+
+        # --- Record successful segments in the hash-based cache (v0.12) ---
+        # After the bridge succeeds (or all segments were cache hits), record
+        # each successful output WAV in the SegmentCache so future re-runs of
+        # this job can skip segments whose inputs haven't changed.
+        if seg_cache and cache_keys:
+            try:
+                _cached_count = 0
+                for r in _results:
+                    if r.get("status") != "ok":
+                        continue
+                    rid = str(r.get("id", r.get("index", "")))
+                    key = cache_keys.get(rid)
+                    if not key:
+                        continue
+                    out_audio = r.get("output_audio") or r.get("preserved_audio")
+                    if out_audio and Path(out_audio).is_file():
+                        seg_cache.put(key, Path(out_audio))
+                        _cached_count += 1
+                if _cached_count:
+                    seg_cache.save()
+                    print(f"Segment cache: recorded {_cached_count} segment(s)")
+            except Exception as exc:
+                print(f"WARNING: cache write failed: {exc}", file=sys.stderr)
 
     # ====================================================================
     # ORIGINAL VTV PIPELINE (when --speaker-profiling is off)

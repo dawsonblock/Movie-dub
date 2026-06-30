@@ -165,7 +165,7 @@ class TestEstimateAgeFallback:
         assert r["method"] == "pitch_heuristic"
         # model_error should be present since a load was attempted
         assert "model_error" in r
-        assert "age_regressor" in r["model_error"]
+        assert "voice_age_regressor" in r["model_error"]
 
     def test_on_raises_when_model_unavailable(self):
         with pytest.raises(RuntimeError, match="make setup-age"):
@@ -201,7 +201,7 @@ class TestSingleton:
         get_regressor()
         err = last_load_error()
         assert err != ""
-        assert "age_regressor" in err
+        assert "voice_age_regressor" in err
 
     def test_reset_clears_error(self):
         get_regressor()

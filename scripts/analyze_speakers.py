@@ -620,12 +620,21 @@ def main() -> int:
     segment_assignments: list[dict] = []
     if args.segments_json:
         seg_path = Path(args.segments_json).expanduser().resolve()
-        if seg_path.is_file():
-            try:
-                segments = json.loads(seg_path.read_text(encoding="utf-8"))
-                segment_assignments = assign_segments_to_speakers(turns, segments)
-            except Exception as exc:
-                print(f"  WARNING: segment assignment failed: {exc}")
+        if not seg_path.is_file():
+            audio_path.unlink(missing_ok=True)
+            return die(f"segments-json file not found: {seg_path}")
+        try:
+            segments = json.loads(seg_path.read_text(encoding="utf-8"))
+            if not segments:
+                audio_path.unlink(missing_ok=True)
+                return die(f"segments-json file is empty: {seg_path}")
+            segment_assignments = assign_segments_to_speakers(turns, segments)
+        except Exception as exc:
+            audio_path.unlink(missing_ok=True)
+            return die(f"segment assignment failed: {exc}")
+        if not segment_assignments:
+            audio_path.unlink(missing_ok=True)
+            return die("segment assignment produced no results (no turns?)")
 
     # Write speaker_profiles.json
     result = {

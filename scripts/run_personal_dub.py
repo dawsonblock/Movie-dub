@@ -246,6 +246,7 @@ def build_queue_tts_with_speakers(
     voice_rate: str = "+0%",
     volume: str = "+0%",
     pitch: str = "+0Hz",
+    language: str = "en",
 ) -> list[dict]:
     """Build a queue_tts list with per-speaker ref_wav from speaker profiles.
 
@@ -282,7 +283,7 @@ def build_queue_tts_with_speakers(
         text = seg["text"]
         voice = "clone"
         _key = hashlib.md5(
-            f"en-{text}-{voice}-{voice_rate}-{volume}-{pitch}-{tts_type}".encode()
+            f"{language}-{text}-{voice}-{voice_rate}-{volume}-{pitch}-{tts_type}".encode()
         ).hexdigest()
         start_ms = int(seg["start"] * 1000)
         end_ms = int(seg["end"] * 1000)
@@ -375,7 +376,15 @@ def run_openvoice_bridge_direct(
     env["PYTHONPATH"] = (
         openvoice_repo.as_posix() + os.pathsep + env.get("PYTHONPATH", "")
     )
-    return run_subprocess(cmd, openvoice_repo, "openvoice-bridge-direct", env=env)
+    result = run_subprocess(cmd, openvoice_repo, "openvoice-bridge-direct", env=env)
+    # Bridge returns exit code 2 for partial success (some segments ok, some
+    # failed). When allow_partial is True, treat exit code 2 as success (0).
+    if allow_partial and result.returncode == 2:
+        print("OpenVoice bridge: partial success (exit 2) accepted via --allow-partial")
+        return subprocess.CompletedProcess(
+            args=result.args, returncode=0, stdout=result.stdout, stderr=result.stderr,
+        )
+    return result
 
 
 def main() -> int:
@@ -703,6 +712,7 @@ def main() -> int:
     # STT → STS → analyze_speakers(with real timings) → direct OpenVoice bridge
     # This bypasses pyVideoTrans's TTS layer entirely for per-speaker routing.
     # ====================================================================
+    srt_file: Path | None = None
     if use_split_pipeline:
         # --- Step 1: STT (speech-to-text) → source SRT ---
         update_job_stage(job_json_path, "transcription", "running")
@@ -756,8 +766,13 @@ def main() -> int:
             update_job_stage(job_json_path, "translation", "fail")
             return die(f"STS failed: {sts_result.stderr[-1500:]}")
         # Find the translated SRT
-        lang_code = args.target_language.lower().replace("-", "")
-        translated_srt = sts_output / f"{source_srt.stem}.{lang_code}.srt"
+        # STS names it {stem}.{target_language_code}.srt where
+        # target_language_code is the raw value we passed (e.g. "zh-cn").
+        # Try the raw code first, then the normalized (no hyphen) version.
+        translated_srt = sts_output / f"{source_srt.stem}.{args.target_language}.srt"
+        if not translated_srt.is_file():
+            lang_code = args.target_language.lower().replace("-", "")
+            translated_srt = sts_output / f"{source_srt.stem}.{lang_code}.srt"
         if not translated_srt.is_file():
             srts = list(sts_output.glob("*.srt"))
             if not srts:
@@ -822,6 +837,17 @@ def main() -> int:
                 "timings. Re-run without --speaker-profile-json or ensure "
                 "the profile was generated with --segments-json."
             )
+        # Validate segment_assignments count matches the source SRT segments.
+        # If the profile was generated from a different video/SRT, the indices
+        # won't align and per-speaker routing will be wrong.
+        source_segments = parse_srt_to_segments(source_srt)
+        if source_segments and len(segment_assignments) != len(source_segments):
+            print(
+                f"WARNING: segment_assignments count ({len(segment_assignments)}) "
+                f"does not match source SRT segment count ({len(source_segments)}). "
+                f"This may indicate the profile was generated from a different "
+                f"video. Per-speaker routing may be incorrect."
+            )
         print(f"  {len(speakers)} speaker(s) profiled, "
               f"{len(segment_assignments)} segment assignments")
         for spk in speakers:
@@ -853,6 +879,7 @@ def main() -> int:
             speaker_profiles=speaker_profiles_data,
             cache_folder=cache_folder,
             tts_type=tts_provider_int,
+            language=args.target_language,
         )
         if not queue_tts:
             update_job_stage(job_json_path, "tts", "fail")
@@ -900,36 +927,44 @@ def main() -> int:
 
         # Handle fallback engine
         if bridge_result.returncode != 0 and args.fallback_tts_engine != "none":
-            fallback_provider_int = int(TTS_ENGINE_MAP[args.fallback_tts_engine])
-            print(
-                f"Primary TTS engine '{args.tts_engine}' failed (exit "
-                f"{bridge_result.returncode}). Retrying with fallback "
-                f"'{args.fallback_tts_engine}'..."
-            )
-            fallback_attempted = True
-            # Rebuild queue with fallback provider
-            queue_tts = build_queue_tts_with_speakers(
-                translated_srt=job_srt,
-                speaker_profiles=speaker_profiles_data,
-                cache_folder=cache_folder,
-                tts_type=fallback_provider_int,
-            )
-            bridge_result = run_openvoice_bridge_direct(
-                queue_tts=queue_tts,
-                manifest_path=openvoice_manifest_explicit,
-                queue_path=openvoice_queue,
-                work_dir=openvoice_work,
-                logs_path=openvoice_logs,
-                preserve_dir=generated_audio,
-                openvoice_python=openvoice_python,
-                bridge_script=bridge_script,
-                openvoice_repo=openvoice_repo,
-                checkpoint_dir=checkpoint_dir,
-                language=ov_lang,
-                device=device,
-                allow_partial=args.allow_partial,
-            )
-            tts_engine_used = args.fallback_tts_engine
+            if args.fallback_tts_engine != "openvoice":
+                print(
+                    f"WARNING: fallback engine '{args.fallback_tts_engine}' is "
+                    f"not supported in split pipeline (only OpenVoice supports "
+                    f"per-speaker ref_wav). Skipping fallback."
+                )
+            else:
+                print(
+                    f"Primary TTS engine '{args.tts_engine}' failed (exit "
+                    f"{bridge_result.returncode}). Retrying with fallback "
+                    f"'{args.fallback_tts_engine}'..."
+                )
+                fallback_attempted = True
+                # Rebuild queue with fallback provider
+                fallback_provider_int = int(TTS_ENGINE_MAP[args.fallback_tts_engine])
+                queue_tts = build_queue_tts_with_speakers(
+                    translated_srt=job_srt,
+                    speaker_profiles=speaker_profiles_data,
+                    cache_folder=cache_folder,
+                    tts_type=fallback_provider_int,
+                    language=args.target_language,
+                )
+                bridge_result = run_openvoice_bridge_direct(
+                    queue_tts=queue_tts,
+                    manifest_path=openvoice_manifest_explicit,
+                    queue_path=openvoice_queue,
+                    work_dir=openvoice_work,
+                    logs_path=openvoice_logs,
+                    preserve_dir=generated_audio,
+                    openvoice_python=openvoice_python,
+                    bridge_script=bridge_script,
+                    openvoice_repo=openvoice_repo,
+                    checkpoint_dir=checkpoint_dir,
+                    language=ov_lang,
+                    device=device,
+                    allow_partial=args.allow_partial,
+                )
+                tts_engine_used = args.fallback_tts_engine
 
         # Wrap into a CompletedProcess-like result for downstream code
         result = bridge_result
@@ -1112,12 +1147,12 @@ def main() -> int:
                 p for p in (PYVIDEOTRANS / "tmp").rglob("*.srt")
                 if p.stat().st_mtime >= started
             ]
-        if new_srts:
-            lang_lower = args.target_language.lower().replace("-", "")
-            lang_matches = [p for p in new_srts if lang_lower in p.name.lower()]
-            chosen = lang_matches[0] if lang_matches else max(new_srts, key=lambda p: p.stat().st_mtime)
-            shutil.copy2(chosen, job_srt)
-            srt_file = job_srt
+            if new_srts:
+                lang_lower = args.target_language.lower().replace("-", "")
+                lang_matches = [p for p in new_srts if lang_lower in p.name.lower()]
+                chosen = lang_matches[0] if lang_matches else max(new_srts, key=lambda p: p.stat().st_mtime)
+                shutil.copy2(chosen, job_srt)
+                srt_file = job_srt
 
     # --- Enrich manifest with speaker_id (Blocker 5) ---
     # If speaker profiling is active, inject speaker_id + reference info into

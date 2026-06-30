@@ -162,6 +162,7 @@ def write_review_file(
     srt_file: Path | None,
     job_dir: Path,
     generated_audio_dir: Path,
+    speaker_profiles: dict | None = None,
 ) -> None:
     """Write review_segments.json from the manifest + queue/SRT data.
 
@@ -169,6 +170,10 @@ def write_review_file(
     output_audio path, status, reason, role, ref_wav, language, and device.
     Segment WAVs are copied from preserved_audio (or output_audio) into the
     generated_audio dir so regeneration can find them.
+
+    If speaker_profiles is provided (the speaker_profiles.json dict), each
+    review entry is enriched with speaker_id, target_gender, target_age_band,
+    and target_pitch_median_hz from the manifest's per-result speaker fields.
     """
     if not manifest_file or not manifest_file.is_file():
         return
@@ -253,6 +258,10 @@ def write_review_file(
                 "ref_wav": item.get("ref_wav") or item.get("voice_reference", ""),
                 "language": manifest.get("language", "EN"),
                 "device": manifest.get("device", "auto"),
+                "speaker_id": result.get("speaker_id", ""),
+                "target_gender": result.get("target_gender", ""),
+                "target_age_band": result.get("target_age_band", ""),
+                "target_pitch_median_hz": result.get("target_pitch_median_hz", 0.0),
             }
         )
         original_audio = Path(str(result.get("preserved_audio") or result.get("output_audio", "")))

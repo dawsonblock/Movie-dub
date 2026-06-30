@@ -187,6 +187,91 @@ final MP4. Job artifacts (manifest, segment WAVs, dubbed audio, review,
 remux command, report, job.json) are kept under
 `pyvideotrans-main/tmp/personal_dub/<job_id>/`.
 
+### Speaker profiling (multi-character scenes)
+
+For videos with multiple speakers, enable per-speaker profiling to
+diarize speakers, extract a canonical reference voice per speaker, and
+estimate apparent gender / age band / pitch per speaker:
+
+```bash
+# Requires HF_TOKEN for pyannote diarization
+export HF_TOKEN=hf_xxxxx
+make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 \
+     SPEAKER_PROFILING=1 DIARIZATION=pyannote \
+     TTS_ENGINE=openvoice VERIFY_PITCH=1
+```
+
+This runs `scripts/analyze_speakers.py` before the dub, producing:
+
+- `job/speakers/speaker_profiles.json` — per-speaker gender, age band,
+  pitch profile (median/p10/p90 F0, voiced ratio), and reference audio path
+- `job/speakers/SPEAKER_00/reference.wav` — canonical 3-8s reference clip
+- `job/speakers/SPEAKER_01/reference.wav` — etc.
+- `job/speakers/diarization.rttm` — raw pyannote output for audit
+
+Each segment in the manifest is enriched with `speaker_id`,
+`target_gender`, `target_age_band`, `target_pitch_median_hz`, and
+`tts_engine`. The review file (`review_segments.json`) includes the same
+fields per segment.
+
+**Age estimation is a pitch-based heuristic, not a trained model.** It
+classifies into child / teen / adult / senior bands based on F0 ranges
+and voiced ratio. A real age regressor is flagged as future work.
+
+You can also run speaker profiling standalone:
+
+```bash
+make analyze-speakers INPUT=~/Movies/test.mp4 OUTPUT=tmp/speakers
+```
+
+And reuse an existing profile for a re-dub:
+
+```bash
+make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 \
+     SPEAKER_PROFILE_JSON=tmp/speakers/speaker_profiles.json
+```
+
+### Post-generation pitch verification
+
+With `--verify-pitch`, each generated segment's F0 is compared to the
+source speaker profile. Segments are flagged:
+
+- `needs_review` — pitch differs by >2 semitones, or voiced_ratio < 0.3
+- `rewrite_shorter` — generated duration / target duration > 1.35
+- `ok` — within thresholds
+
+Results are written to `job/pitch_verification.json`. Use
+`--fail-on-pitch-mismatch` to fail the job if any segment is flagged.
+
+```bash
+make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 \
+     SPEAKER_PROFILING=1 VERIFY_PITCH=1 FAIL_ON_PITCH_MISMATCH=1
+```
+
+### TTS engine selection
+
+The wrapper supports three TTS engines via `--tts-engine`:
+
+| Engine | Provider | Description |
+|--------|----------|-------------|
+| `openvoice` | 34 | OpenVoice V2 local voice cloning (default) |
+| `qwen3-local` | 1 | Qwen3-TTS local built-in |
+| `omnivoice` | 2 | OmniVoice local API |
+
+```bash
+make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 TTS_ENGINE=qwen3-local
+```
+
+A fallback engine can be configured with `--fallback-tts-engine`. If the
+primary engine fails (nonzero exit), the wrapper retries with the
+fallback. Qwen3-local and OmniVoice require their own setup scripts (not
+yet wired); `make doctor` reports which engines are ready.
+
+```bash
+make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 \
+     TTS_ENGINE=qwen3-local FALLBACK_TTS_ENGINE=openvoice
+```
+
 ### Job directory safety
 
 The wrapper will **never** delete an existing job directory by default.

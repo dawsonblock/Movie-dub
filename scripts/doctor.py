@@ -313,6 +313,66 @@ def collect_checks(
         import_check("Audio", py_python, "transformers", cwd=PYVIDEOTRANS, required=False)
     )
 
+    # --- Speaker profiling dependencies (v0.8) ---
+    # pyannote.audio + torchaudio are required for --speaker-profiling with
+    # --speaker-diarization pyannote. librosa is shared with gender detection.
+    # HF_TOKEN is required for pyannote model access (warn, not fail).
+    checks.append(
+        import_check("Speaker", py_python, "pyannote.audio", cwd=PYVIDEOTRANS,
+                      required=False)
+    )
+    checks.append(
+        import_check("Speaker", py_python, "torchaudio", cwd=PYVIDEOTRANS,
+                      required=False)
+    )
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    checks.append(
+        check("Speaker", "HF_TOKEN env", bool(hf_token),
+              "set" if hf_token else "not set (required for pyannote diarization)",
+              required=False)
+    )
+    # Per-engine readiness (Blocker 4): report which TTS engines are configured.
+    # OpenVoice readiness is already checked above. Qwen3-local and OmniVoice
+    # have their own setup requirements that are not yet wired into setup scripts.
+    checks.append(
+        check("TTS Engines", "openvoice (provider 34)",
+              need_openvoice and (ov_checkpoint_dir / "converter" / "checkpoint.pth").is_file(),
+              "ready" if (ov_checkpoint_dir / "converter" / "checkpoint.pth").is_file()
+              else "checkpoints missing",
+              required=False)
+    )
+    checks.append(
+        check("TTS Engines", "qwen3-local (provider 1)", False,
+              "not yet configured (run scripts/setup_qwen3_local.sh)",
+              required=False)
+    )
+    checks.append(
+        check("TTS Engines", "omnivoice (provider 2)", False,
+              "not yet configured (run scripts/setup_omnivoice.sh)",
+              required=False)
+    )
+    # Demucs cache presence (Blocker 8): warn if not cached so users know
+    # Demucs will fall back to ffmpeg without --allow-demucs-download.
+    demucs_cached = False
+    try:
+        import torch as _torch
+        hub_dir = Path(_torch.hub.get_dir())
+        for d in [hub_dir / "checkpoints",
+                  Path.home() / "Library" / "Caches" / "torch" / "hub" / "checkpoints",
+                  Path.home() / ".cache" / "torch" / "hub" / "checkpoints"]:
+            if d.is_dir():
+                if any("htdemucs" in p.name.lower() and p.stat().st_size > 1_000_000
+                       for p in d.iterdir()):
+                    demucs_cached = True
+                    break
+    except Exception:
+        pass
+    checks.append(
+        check("Audio", "Demucs htdemucs cached", demucs_cached,
+              "cached" if demucs_cached else "not cached (will fall back to ffmpeg)",
+              required=demucs_required)
+    )
+
     return checks
 
 

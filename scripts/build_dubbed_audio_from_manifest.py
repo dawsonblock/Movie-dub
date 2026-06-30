@@ -309,9 +309,40 @@ def _demucs_vocal_separation(
         from demucs.apply import apply_model
 
         device = "mps" if torch.backends.mps.is_available() else "cpu"
-        # Check if the model is already cached. If not, and allow_download is
-        # False, refuse to download and return None so the caller falls back
-        # to ffmpeg.
+        # Stronger cache preflight (Blocker 8): check the local Demucs cache
+        # directory BEFORE calling get_model(), which may itself trigger a
+        # network resolution/download depending on Demucs internals. If the
+        # model is not cached and downloads are refused, fall back to ffmpeg
+        # without ever calling get_model().
+        def _demucs_cache_present() -> bool:
+            """Check if the htdemucs model is already in the torch cache."""
+            cache_dirs: list[Path] = []
+            # torch.hub cache
+            hub_dir = Path(torch.hub.get_dir()) if hasattr(torch.hub, "get_dir") else None
+            if hub_dir:
+                cache_dirs.append(hub_dir / "checkpoints")
+            # macOS CoreAudio/torch cache fallback
+            home = Path.home()
+            cache_dirs.append(home / "Library" / "Caches" / "torch" / "hub" / "checkpoints")
+            cache_dirs.append(home / ".cache" / "torch" / "hub" / "checkpoints")
+            for d in cache_dirs:
+                if d.is_dir():
+                    for p in d.iterdir():
+                        if "htdemucs" in p.name.lower() and p.stat().st_size > 1_000_000:
+                            return True
+            return False
+
+        if not allow_download and not _demucs_cache_present():
+            print(
+                "WARNING: Demucs htdemucs model not found in local cache and "
+                "--allow-demucs-download not set. Falling back to ffmpeg "
+                "without calling get_model().",
+                file=sys.stderr,
+            )
+            raw_audio.unlink(missing_ok=True)
+            return None
+
+        # Model is cached or download is allowed; safe to call get_model
         try:
             model = get_model("htdemucs")
         except Exception as exc:
@@ -321,6 +352,7 @@ def _demucs_vocal_separation(
                     f"not set. Falling back to ffmpeg. Error: {exc}",
                     file=sys.stderr,
                 )
+                raw_audio.unlink(missing_ok=True)
                 return None
             # Re-raise to let the caller's exception boundary handle it
             raise

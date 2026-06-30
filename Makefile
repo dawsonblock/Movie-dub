@@ -1,4 +1,4 @@
-.PHONY: doctor doctor-strict doctor-demucs doctor-checkpoints setup-ffmpeg setup-pyvt setup-openvoice setup-checkpoints download-openvoice smoke-openvoice smoke-e2e test-openvoice test-pyvt dub proof proof-report generate-voices clean
+.PHONY: doctor doctor-strict doctor-demucs doctor-checkpoints setup-ffmpeg setup-pyvt setup-openvoice setup-checkpoints download-openvoice smoke-openvoice smoke-e2e test-openvoice test-pyvt dub proof proof-report generate-voices analyze-speakers verify-pitch clean
 
 doctor:
 	python3 scripts/doctor.py
@@ -104,6 +104,38 @@ generate-voices:
 	@echo "Generating male and female reference voices..."
 	@cd OpenVoice-main && .venv/bin/python ../scripts/generate_reference_voices.py
 
+# Speaker profiling: diarization + per-speaker reference extraction.
+# Usage:
+#   make analyze-speakers INPUT=~/Movies/test.mp4 OUTPUT=tmp/speakers
+# Optional: DIARIZATION=pyannote NUM_SPEAKERS=auto HF_TOKEN=$(HF_TOKEN)
+analyze-speakers:
+	@if [ -z "$(INPUT)" ] || [ -z "$(OUTPUT)" ]; then \
+		echo "Usage: make analyze-speakers INPUT=<input.mp4> OUTPUT=<speakers_dir>"; \
+		echo "  DIARIZATION=pyannote NUM_SPEAKERS=auto HF_TOKEN=\$$HF_TOKEN"; \
+		exit 1; \
+	fi
+	pyvideotrans-main/.venv/bin/python scripts/analyze_speakers.py \
+		--input "$(INPUT)" \
+		--output-dir "$(OUTPUT)" \
+		--diarization $(or $(DIARIZATION),pyannote) \
+		--num-speakers $(or $(NUM_SPEAKERS),auto) \
+		$(if $(HF_TOKEN),--hf-token $(HF_TOKEN))
+
+# Post-generation pitch verification.
+# Usage:
+#   make verify-pitch MANIFEST=tmp/job/openvoice_manifest.json \
+#     PROFILES=tmp/job/speakers/speaker_profiles.json \
+#     OUTPUT=tmp/job/pitch_verification.json
+verify-pitch:
+	@if [ -z "$(MANIFEST)" ] || [ -z "$(PROFILES)" ] || [ -z "$(OUTPUT)" ]; then \
+		echo "Usage: make verify-pitch MANIFEST=<manifest.json> PROFILES=<profiles.json> OUTPUT=<out.json>"; \
+		exit 1; \
+	fi
+	pyvideotrans-main/.venv/bin/python scripts/verify_segment_pitch.py \
+		--manifest "$(MANIFEST)" \
+		--speaker-profiles "$(PROFILES)" \
+		--output "$(OUTPUT)"
+
 # Personal dubbing wrapper. Usage:
 #   make dub INPUT=~/Movies/test.mp4 OUTPUT=~/Movies/dubbed-test.mp4
 # Optional: SOURCE=auto TARGET=en GENDER=auto MODEL=whisper-large-v3-turbo
@@ -112,6 +144,9 @@ generate-voices:
 #           NO_NORMALIZE=1 FINAL_GAIN=1.0
 #           BACKGROUND_TIMEOUT=900 LUFS_TIMEOUT=1200 FAIL_IF_BACKGROUND_MIX_FAILS=1
 #           DEMUCS_TIMEOUT=900 ALLOW_DEMUCS_DOWNLOAD=1
+#           SPEAKER_PROFILING=1 DIARIZATION=pyannite NUM_SPEAKERS=auto
+#           TTS_ENGINE=openvoice FALLBACK_TTS_ENGINE=none
+#           VERIFY_PITCH=1 FAIL_ON_PITCH_MISMATCH=1
 dub:
 	@if [ -z "$(INPUT)" ] || [ -z "$(OUTPUT)" ]; then \
 		echo "Usage: make dub INPUT=<input.mp4> OUTPUT=<output.mp4>"; \
@@ -119,6 +154,8 @@ dub:
 		echo "  BACKGROUND_VOLUME=0.15 VOCAL_SEPARATION=1 VOCAL_SEPARATION_METHOD=ffmpeg"; \
 		echo "  For AI separation: VOCAL_SEPARATION_METHOD=demucs ALLOW_DEMUCS_DOWNLOAD=1"; \
 		echo "  DUCKING=1"; \
+		echo "  SPEAKER_PROFILING=1 DIARIZATION=pyannote TTS_ENGINE=openvoice"; \
+		echo "  VERIFY_PITCH=1 FAIL_ON_PITCH_MISMATCH=1"; \
 		exit 1; \
 	fi
 	python3 scripts/run_personal_dub.py \
@@ -142,4 +179,13 @@ dub:
 		$(if $(DEMUCS_TIMEOUT),--demucs-timeout $(DEMUCS_TIMEOUT)) \
 		$(if $(ALLOW_DEMUCS_DOWNLOAD),--allow-demucs-download) \
 		$(if $(CPU_ONLY),--cpu-only) \
-		$(if $(FAIL_IF_BACKGROUND_MIX_FAILS),--fail-if-background-mix-fails)
+		$(if $(FAIL_IF_BACKGROUND_MIX_FAILS),--fail-if-background-mix-fails) \
+		$(if $(SPEAKER_PROFILING),--speaker-profiling) \
+		$(if $(DIARIZATION),--speaker-diarization $(DIARIZATION)) \
+		$(if $(NUM_SPEAKERS),--num-speakers $(NUM_SPEAKERS)) \
+		$(if $(SPEAKER_PROFILE_JSON),--speaker-profile-json $(SPEAKER_PROFILE_JSON)) \
+		$(if $(HF_TOKEN),--hf-token $(HF_TOKEN)) \
+		$(if $(TTS_ENGINE),--tts-engine $(TTS_ENGINE)) \
+		$(if $(FALLBACK_TTS_ENGINE),--fallback-tts-engine $(FALLBACK_TTS_ENGINE)) \
+		$(if $(VERIFY_PITCH),--verify-pitch) \
+		$(if $(FAIL_ON_PITCH_MISMATCH),--fail-on-pitch-mismatch)

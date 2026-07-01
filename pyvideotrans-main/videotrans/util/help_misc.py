@@ -164,13 +164,13 @@ def shutdown_system():
 
     if system == "Windows":
         # Windows 下的关机命令
-        subprocess.call("shutdown /s /t 1")
+        subprocess.call(["shutdown", "/s", "/t", "1"])
     elif system == "Linux":
         # Linux 下的关机命令
-        subprocess.call("poweroff")
+        subprocess.call(["poweroff"])
     elif system == "Darwin":
         # macOS 下的关机命令
-        subprocess.call("sudo shutdown -h now", shell=True)
+        subprocess.call(["sudo", "shutdown", "-h", "now"])
     else:
         logger.error(f"Unsupported system: {system}")
 

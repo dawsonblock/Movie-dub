@@ -447,8 +447,8 @@ class MainWindow(QMainWindow, Ui_MainWindow):
             # Windows平台 - 使用taskkill
             try:
                 result = subprocess.run(
-                    f'taskkill /F /FI "USERNAME eq {current_user}" /IM ffmpeg.exe',
-                    shell=True,
+                    ["taskkill", "/F", "/FI", f"USERNAME eq {current_user}", "/IM", "ffmpeg.exe"],
+                    shell=False,
                     capture_output=True,
                     text=True
                 )

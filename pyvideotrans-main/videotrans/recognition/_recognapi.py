@@ -192,16 +192,10 @@ class APIRecogn(BaseRecogn):
             except json.JSONDecodeError:
                 try:
                     segments = ast.literal_eval(list_str)
-                except (ValueError, SyntaxError):
-                    context = {
-                        "null": None,
-                        "true": True,
-                        "false": False,
-                        "__builtins__": None
-                    }
-                    segments = eval(list_str, context)
+                except (ValueError, SyntaxError) as e:
+                    logger.error(f"segment parsing failed: {e}")
             except Exception as e:
-                logger.error(f"AST eval failed: {e}")
+                logger.error(f"segment parsing failed: {e}")
             if not segments:
                 return [], []
 

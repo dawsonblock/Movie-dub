@@ -487,6 +487,7 @@ def run_openvoice_bridge_direct(
     language: str = "EN",
     device: str = "auto",
     allow_partial: bool = False,
+    base_speaker: str = "",
 ) -> subprocess.CompletedProcess:
     """Run the OpenVoice bridge directly with a pre-built queue_tts.
 
@@ -515,6 +516,8 @@ def run_openvoice_bridge_direct(
     ]
     if device:
         cmd.extend(["--device", device])
+    if base_speaker:
+        cmd.extend(["--base-speaker", base_speaker])
     env = dict(os.environ)
     env["PYTHONPATH"] = (
         openvoice_repo.as_posix() + os.pathsep + env.get("PYTHONPATH", "")
@@ -698,6 +701,10 @@ def main() -> int:
                         choices=list(TTS_ENGINE_MAP.keys()) + ["none"],
                         default="none",
                         help="fallback TTS engine if primary fails (default: none)")
+    # --- OpenVoice options (only used when --tts-engine openvoice) ---
+    parser.add_argument("--base-speaker", default="",
+                        help="OpenVoice base speaker (e.g. EN-US, EN-NEWEST, "
+                             "EN-DEFAULT). Empty = first available speaker.")
     # --- Qwen3-TTS options (only used when --tts-engine qwen3-local) ---
     parser.add_argument("--qwen3-model", default=QWEN3_DEFAULT_MODEL,
                         help=f"Qwen3-TTS model path or HF repo ID "
@@ -1530,6 +1537,7 @@ def main() -> int:
                     language=ov_lang,
                     device=device,
                     allow_partial=args.allow_partial,
+                    base_speaker=args.base_speaker,
                 )
             elif engine == "qwen3-local":
                 if not QWEN3_BRIDGE_SCRIPT.is_file():

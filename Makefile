@@ -225,6 +225,7 @@ dub:
 		$(if $(HF_TOKEN),--hf-token $(HF_TOKEN)) \
 		$(if $(TTS_ENGINE),--tts-engine $(TTS_ENGINE)) \
 		$(if $(FALLBACK_TTS_ENGINE),--fallback-tts-engine $(FALLBACK_TTS_ENGINE)) \
+		$(if $(BASE_SPEAKER),--base-speaker $(BASE_SPEAKER)) \
 		$(if $(VERIFY_PITCH),--verify-pitch) \
 		$(if $(FAIL_ON_PITCH_MISMATCH),--fail-on-pitch-mismatch) \
 		$(if $(PREFER_EMBEDDED_SUBTITLES),--prefer-embedded-subtitles) \

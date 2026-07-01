@@ -73,12 +73,17 @@ make doctor
 Optional — Qwen3-TTS local engine (Apple Silicon, independent of OpenVoice):
 
 ```bash
-make setup-qwen3
+make setup-qwen3        # optional: better-quality TTS (Apple Silicon)
 make doctor-qwen3
 make smoke-qwen3
-make setup-age        # optional: install trained age-regression model
+make setup-age          # optional: trained age-regression model
 make smoke-age
 ```
+
+`qwen3-local` is strongly recommended over `openvoice` for voice quality: it
+uses the `mlx-community/Qwen3-TTS-0.6B` model directly on Apple Silicon and
+produces much more natural speech than OpenVoice V2's MeloTTS + voice-conversion
+pipeline.
 
 The default install does **not** require Demucs. Demucs is only needed for
 high-quality AI-based vocal separation. The default background extraction
@@ -201,6 +206,9 @@ Audio quality flags:
 | `--background-timeout` | `300` | FFmpeg timeout for background audio extraction (seconds) |
 | `--lufs-timeout` | `600` | FFmpeg timeout for LUFS normalization (seconds) |
 | `--fail-if-background-mix-fails` | off | Fail hard if background mixing fails instead of silently producing speech-only output |
+| `--tts-engine` | `openvoice` | `openvoice` (legacy) or `qwen3-local` (Apple Silicon, more natural) |
+| `--base-speaker` | auto | OpenVoice base speaker: `EN-NEWEST`, `EN-US`, `EN-DEFAULT`, `EN-AU`, etc. |
+| `--qwen3-model` | `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16` | Local path or HF repo for Qwen3-TTS |
 
 **Note on `--voice-volume`:** With default peak normalization, increasing
 `--voice-volume` changes the voice-to-background balance but the final peak
@@ -241,7 +249,7 @@ estimate apparent gender / age band / pitch per speaker:
 export HF_TOKEN=hf_xxxxx
 make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 \
      SPEAKER_PROFILING=1 DIARIZATION=pyannote \
-     TTS_ENGINE=openvoice VERIFY_PITCH=1 AGE_MODEL=auto \
+     TTS_ENGINE=qwen3-local VERIFY_PITCH=1 AGE_MODEL=auto \
      CHARACTER_PROFILES=1 CPU_ONLY=1
 ```
 
@@ -251,6 +259,12 @@ pyVideoTrans venv. `CHARACTER_PROFILES=1` writes `character_profiles.json`
 with named, reviewable characters (and respects `voice_locked`).
 `CPU_ONLY=1` is recommended on Apple Silicon for the initial Whisper pass
 because `whisper-large-v3-turbo` can exhaust MPS memory.
+
+**TTS engine choice:** `TTS_ENGINE=qwen3-local` (Apple Silicon) gives the most
+natural, human-sounding voice. `TTS_ENGINE=openvoice` is the legacy option; if
+you use it, you can experiment with `BASE_SPEAKER=EN-NEWEST` (or
+`EN-DEFAULT`, `EN-US`, `EN-AU`, `EN-BR`, `EN-INDIA`) to find the least
+robotic base voice for your clip.
 
 #### Where the text comes from: subtitles vs. ASR
 

@@ -376,6 +376,10 @@ def run_benchmark(args: argparse.Namespace) -> int:
         cmd.append("--ducking")
     if args.qwen3_model and args.tts_engine == "qwen3-local":
         cmd.extend(["--qwen3-model", args.qwen3_model])
+    if args.omnivoice_url and args.tts_engine == "omnivoice":
+        cmd.extend(["--omnivoice-url", args.omnivoice_url])
+    if args.tts_speed != 1.0:
+        cmd.extend(["--tts-speed", str(args.tts_speed)])
     if args.age_model:
         cmd.extend(["--age-model", args.age_model])
     if args.resume:
@@ -470,7 +474,7 @@ def main() -> int:
     parser.add_argument("--source-language", default="auto")
     parser.add_argument("--target-language", default="en")
     parser.add_argument("--tts-engine", default="openvoice",
-                        choices=["openvoice", "qwen3-local"])
+                        choices=["openvoice", "qwen3-local", "omnivoice"])
     parser.add_argument("--speaker-profiling", action="store_true")
     parser.add_argument("--diarization", default="pyannote")
     parser.add_argument("--num-speakers", default="auto")
@@ -481,8 +485,12 @@ def main() -> int:
     parser.add_argument("--background-volume", type=float, default=None)
     parser.add_argument("--ducking", action="store_true")
     parser.add_argument("--qwen3-model", default="")
+    parser.add_argument("--omnivoice-url", default="",
+                        help="OmniVoice server URL (required when --tts-engine omnivoice)")
+    parser.add_argument("--tts-speed", type=float, default=1.0,
+                        help="speech speed multiplier (default 1.0)")
     parser.add_argument("--age-model", default="",
-                        choices=["", "auto", "on", "off"])
+                        choices=["auto", "on", "off"])
     parser.add_argument("--confidence-threshold", type=float, default=0.5,
                         help="age/gender confidence below this counts as a bad guess")
     parser.add_argument("--resume", action="store_true",

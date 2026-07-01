@@ -377,7 +377,8 @@ def collect_checks(
     )
     # Per-engine readiness (Blocker 4): report which TTS engines are configured.
     # OpenVoice readiness is already checked above. Qwen3-local has its own
-    # setup (make setup-qwen3); OmniVoice is not yet wired.
+    # setup (make setup-qwen3). OmniVoice is server-based; the bridge script is
+    # bundled, but the user must provide a running OmniVoice/Gradio endpoint.
     checks.append(
         check("TTS Engines", "openvoice (provider 34)",
               need_openvoice and (ov_checkpoint_dir / "converter" / "checkpoint.pth").is_file(),
@@ -391,9 +392,19 @@ def collect_checks(
               _qwen3_detail(),
               required=False)
     )
+    omnivoice_bridge = ROOT / "bridge" / "omnivoice_segment_tts.py"
+    try:
+        import gradio_client  # noqa: F401
+        import requests  # noqa: F401
+        omnivoice_deps = True
+    except Exception:
+        omnivoice_deps = False
     checks.append(
-        check("TTS Engines", "omnivoice (provider 2)", False,
-              "not yet configured (run scripts/setup_omnivoice.sh)",
+        check("TTS Engines", "omnivoice (provider 2)",
+              omnivoice_bridge.is_file() and omnivoice_deps,
+              "bridge present + client deps available" if omnivoice_bridge.is_file() and omnivoice_deps
+              else ("bridge present; install gradio_client + requests" if omnivoice_bridge.is_file()
+                    else "bridge missing"),
               required=False)
     )
     # --- Age model plugin (v0.12) ---

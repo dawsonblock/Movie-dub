@@ -10,6 +10,9 @@
 .env
 .hf/
 
+# Generated runtime artifacts
+/tmp/
+
 # Generated smoke-test artifacts
 /openvoice-test.wav
 /openvoice-test-manifest.json

@@ -92,6 +92,7 @@ HUGGINGFACE_ASR_PROVIDER = "4"  # HuggingFace ASR for whisper-large-v3-turbo
 # Bridge scripts for the split pipeline
 OPENVOICE_BRIDGE_SCRIPT = ROOT / "bridge" / "openvoice_segment_tts.py"
 QWEN3_BRIDGE_SCRIPT = ROOT / "bridge" / "qwen3_segment_tts.py"
+OMNIVOICE_BRIDGE_SCRIPT = ROOT / "bridge" / "omnivoice_segment_tts.py"
 
 # Default Qwen3-TTS model (MLX bf16, 0.6B Base, supports voice cloning).
 # This is the mlx-community repo that includes the speech_tokenizer/
@@ -179,6 +180,32 @@ def _qwen3_preflight(model_arg: str) -> str | None:
         return None
     # If a custom repo ID was given, we can't prove it without network;
     # let mlx-audio fail at generate time with a real error.
+    return None
+
+
+def _omnivoice_preflight(api_url: str) -> str | None:
+    """Pre-flight checks for the OmniVoice TTS engine.
+
+    The OmniVoice bridge runs on sys.executable (the same python that runs
+    this wrapper). Studio mode needs ``requests``; Gradio mode also needs
+    ``gradio_client``. Returns an error string if required packages are
+    missing, else None.
+    """
+    if not api_url or api_url.strip() == "":
+        return "--omnivoice-url is required when --tts-engine omnivoice is used in split mode."
+    missing: list[str] = []
+    for mod in ("requests", "gradio_client"):
+        try:
+            __import__(mod)
+        except Exception:
+            missing.append(mod)
+    if missing:
+        return (
+            f"OmniVoice requires these packages importable from the "
+            f"wrapper python ({sys.executable}): "
+            f"{', '.join(missing)}. Install with: "
+            f"python3 -m pip install gradio_client requests"
+        )
     return None
 
 
@@ -400,6 +427,8 @@ def _tts_model_id(engine: str, args) -> str:
     """Return a stable model identifier for cache keying."""
     if engine == "qwen3-local":
         return args.qwen3_model
+    if engine == "omnivoice":
+        return f"omnivoice-{args.omnivoice_url}"
     return "openvoice-v2"
 
 
@@ -584,6 +613,54 @@ def run_qwen3_bridge_direct(
     return result
 
 
+def run_omnivoice_bridge_direct(
+    queue_tts: list[dict],
+    manifest_path: Path,
+    queue_path: Path,
+    work_dir: Path,
+    logs_path: Path,
+    preserve_dir: Path,
+    bridge_script: Path,
+    api_url: str,
+    language: str = "auto",
+    speed: float = 1.0,
+    allow_partial: bool = False,
+) -> subprocess.CompletedProcess:
+    """Run the OmniVoice bridge directly with a pre-built queue_tts.
+
+    The OmniVoice bridge runs on sys.executable (the same python that runs
+    this wrapper) because it only needs requests/gradio_client.
+    """
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+    queue_path.write_text(
+        json.dumps(queue_tts, ensure_ascii=False), encoding="utf-8",
+    )
+    work_dir.mkdir(parents=True, exist_ok=True)
+    preserve_dir.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        sys.executable,
+        bridge_script.as_posix(),
+        "--queue-tts-file", queue_path.as_posix(),
+        "--manifest-file", manifest_path.as_posix(),
+        "--work-dir", work_dir.as_posix(),
+        "--api-url", api_url,
+        "--language", language,
+        "--speed", str(speed),
+        "--logs-file", logs_path.as_posix(),
+        "--preserve-dir", preserve_dir.as_posix(),
+    ]
+    result = run_subprocess(cmd, ROOT, "omnivoice-bridge-direct")
+    # Bridge returns exit code 2 for partial success (some segments ok, some
+    # failed). When allow_partial is True, treat exit code 2 as success (0).
+    if allow_partial and result.returncode == 2:
+        print("OmniVoice bridge: partial success (exit 2) accepted via --allow-partial")
+        return subprocess.CompletedProcess(
+            args=result.args, returncode=0, stdout=result.stdout, stderr=result.stderr,
+        )
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Dub a personal video with pyVideoTrans + OpenVoice V2"
@@ -713,6 +790,15 @@ def main() -> int:
                         help="Qwen3-TTS sampling temperature (default: 0.9)")
     parser.add_argument("--qwen3-speed", type=float, default=1.0,
                         help="Qwen3-TTS speech speed multiplier (default: 1.0)")
+    # --- OmniVoice options (only used when --tts-engine omnivoice) ---
+    parser.add_argument("--omnivoice-url", default="",
+                        help="OmniVoice server URL (e.g. http://localhost:3900 "
+                             "for studio mode or http://localhost:7860 for "
+                             "Gradio mode). Required in split mode.")
+    # --- Shared TTS options ---
+    parser.add_argument("--tts-speed", type=float, default=1.0,
+                        help="speech speed multiplier for engines that support "
+                             "it (default: 1.0)")
     # --- Post-generation pitch verification (Blocker 6) ---
     parser.add_argument("--verify-pitch", action="store_true",
                         help="run post-generation pitch verification against "
@@ -813,6 +899,15 @@ def main() -> int:
         qwen3_err = _qwen3_preflight(args.qwen3_model)
         if qwen3_err:
             return die(qwen3_err)
+    omnivoice_in_use = (
+        use_split_pipeline_pre
+        and (args.tts_engine == "omnivoice"
+             or args.fallback_tts_engine == "omnivoice")
+    )
+    if omnivoice_in_use:
+        ov_err = _omnivoice_preflight(args.omnivoice_url)
+        if ov_err:
+            return die(ov_err)
     if not BUILD_AUDIO_SCRIPT.is_file() or not REMUX_SCRIPT.is_file():
         return die("build/remux scripts missing from scripts/")
 
@@ -980,10 +1075,10 @@ def main() -> int:
     if use_split_pipeline:
         # The split pipeline uses bridge scripts directly for per-speaker
         # ref_wav routing. Only engines with a bridge implementation are
-        # supported here. OmniVoice has no bridge yet, so accepting it
-        # would be a lie — the code would silently fall through to OpenVoice
-        # regardless of the --tts-engine flag.
-        SUPPORTED_SPLIT_ENGINES = {"openvoice", "qwen3-local"}
+        # The split pipeline uses bridge scripts directly for per-speaker
+        # ref_wav routing. Only engines with a bridge implementation are
+        # supported here.
+        SUPPORTED_SPLIT_ENGINES = {"openvoice", "qwen3-local", "omnivoice"}
         if args.tts_engine not in SUPPORTED_SPLIT_ENGINES:
             return die(
                 f"--tts-engine '{args.tts_engine}' is not supported in "
@@ -992,7 +1087,8 @@ def main() -> int:
                 f"'{args.tts_engine}' has no bridge implementation. "
                 f"Either drop --speaker-profiling / --speaker-profile-json "
                 f"to use the VTV pipeline (which supports all engines), or "
-                f"use --tts-engine openvoice or --tts-engine qwen3-local. "
+                f"use --tts-engine openvoice, --tts-engine qwen3-local, or "
+                f"--tts-engine omnivoice. "
                 f"Supported engines in split mode: "
                 f"{', '.join(sorted(SUPPORTED_SPLIT_ENGINES))}."
             )
@@ -1000,7 +1096,8 @@ def main() -> int:
             return die(
                 f"--fallback-tts-engine '{args.fallback_tts_engine}' is not "
                 f"supported in speaker-profiling mode for the same reason. "
-                f"Use --fallback-tts-engine none, openvoice, or qwen3-local. "
+                f"Use --fallback-tts-engine none, openvoice, qwen3-local, or "
+                f"omnivoice. "
                 f"Supported: {', '.join(sorted(SUPPORTED_SPLIT_ENGINES))}."
             )
         speakers_dir.mkdir(parents=True, exist_ok=True)
@@ -1558,6 +1655,24 @@ def main() -> int:
                     language=args.target_language,
                     temperature=args.qwen3_temperature,
                     speed=args.qwen3_speed,
+                    allow_partial=args.allow_partial,
+                )
+            elif engine == "omnivoice":
+                if not OMNIVOICE_BRIDGE_SCRIPT.is_file():
+                    return _fail(f"OmniVoice bridge script missing: {OMNIVOICE_BRIDGE_SCRIPT}")
+                if not args.omnivoice_url:
+                    return _fail("--omnivoice-url is required when using --tts-engine omnivoice in split mode")
+                return run_omnivoice_bridge_direct(
+                    queue_tts=q_tts,
+                    manifest_path=openvoice_manifest_explicit,
+                    queue_path=openvoice_queue,
+                    work_dir=openvoice_work,
+                    logs_path=openvoice_logs,
+                    preserve_dir=generated_audio,
+                    bridge_script=OMNIVOICE_BRIDGE_SCRIPT,
+                    api_url=args.omnivoice_url,
+                    language=args.target_language,
+                    speed=args.tts_speed,
                     allow_partial=args.allow_partial,
                 )
             else:

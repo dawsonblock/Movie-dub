@@ -39,7 +39,7 @@ from pathlib import Path
 # Reuse the shared plugin logic so the load is cached and the method string
 # stays consistent with analyze_speakers.py / age_model.py.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from age_model import DEFAULT_AGE_MODEL_REPO  # noqa: E402
+from age_model import DEFAULT_AGE_MODEL_REPO, estimate_age as age_model_estimate  # noqa: E402
 
 
 def age_band(age: float) -> str:
@@ -55,21 +55,71 @@ def age_band(age: float) -> str:
     return "senior"
 
 
-def estimate_age(audio_path: Path, model_path: str | None = None) -> dict:
-    """Run the trained regressor on one WAV. Raises on failure (no fallback)."""
-    from voice_age_regressor import AgeRegressionPipeline
+def _profile_pitch(audio_path: Path) -> dict:
+    """Compute pitch profile from a WAV clip using librosa.pyin.
 
-    source = model_path or DEFAULT_AGE_MODEL_REPO
-    regressor = AgeRegressionPipeline.from_pretrained(source)
-    result = regressor(str(audio_path))
-    age = float(result[0])
+    Returns {median_f0_hz, p10_f0_hz, p90_f0_hz, voiced_ratio}.
+    """
+    import numpy as np
+    import librosa
+
+    y, sr = librosa.load(audio_path.as_posix(), sr=16000, mono=True)
+    if len(y) < sr * 0.3:
+        return {"median_f0_hz": 0.0, "p10_f0_hz": 0.0, "p90_f0_hz": 0.0, "voiced_ratio": 0.0}
+
+    f0, voiced_flag, _ = librosa.pyin(
+        y, fmin=65, fmax=400, sr=sr, frame_length=2048
+    )
+    voiced = voiced_flag & ~np.isnan(f0)
+    voiced_f0 = f0[voiced]
+    total_frames = len(f0)
+    voiced_ratio = float(np.sum(voiced)) / float(total_frames) if total_frames else 0.0
+
+    if len(voiced_f0) < 5:
+        return {"median_f0_hz": 0.0, "p10_f0_hz": 0.0, "p90_f0_hz": 0.0, "voiced_ratio": voiced_ratio}
+
     return {
-        "estimated_years": round(age, 1),
-        "band": age_band(age),
-        "method": DEFAULT_AGE_MODEL_REPO if model_path is None else model_path,
-        "confidence": None,
-        "note": "Apparent vocal age estimate; not exact biological age.",
+        "median_f0_hz": float(np.median(voiced_f0)),
+        "p10_f0_hz": float(np.percentile(voiced_f0, 10)),
+        "p90_f0_hz": float(np.percentile(voiced_f0, 90)),
+        "voiced_ratio": voiced_ratio,
     }
+
+
+def estimate_age(
+    audio_path: Path,
+    model_path: str | None = None,
+    *,
+    fallback: bool = True,
+) -> dict:
+    """Run the trained regressor on one WAV.
+
+    If the model is unavailable and ``fallback`` is True, compute a pitch-based
+    heuristic estimate instead of raising. This mirrors the fallback behavior
+    used by the main pipeline via ``age_model.estimate_age``.
+    """
+    try:
+        from voice_age_regressor import AgeRegressionPipeline
+
+        source = model_path or DEFAULT_AGE_MODEL_REPO
+        regressor = AgeRegressionPipeline.from_pretrained(source)
+        result = regressor(str(audio_path))
+        age = float(result[0])
+        return {
+            "estimated_years": round(age, 1),
+            "band": age_band(age),
+            "method": DEFAULT_AGE_MODEL_REPO if model_path is None else model_path,
+            "confidence": None,
+            "source": "model",
+            "note": "Apparent vocal age estimate; not exact biological age.",
+        }
+    except Exception as exc:
+        if not fallback:
+            raise
+        pitch = _profile_pitch(audio_path)
+        result = age_model_estimate(audio_path, pitch, use_model="off", model_path=model_path)
+        result["note"] = f"Pitch-based fallback (model unavailable: {exc})."
+        return result
 
 
 def main() -> int:
@@ -84,6 +134,9 @@ def main() -> int:
              "(default: download from HuggingFace by repo id)",
     )
     parser.add_argument("--output", required=True, help="Output JSON path")
+    parser.add_argument("--no-fallback", action="store_true",
+                        help="Fail hard if the trained model is unavailable "
+                             "(default: fall back to pitch heuristic)")
     args = parser.parse_args()
 
     audio_path = Path(args.audio).expanduser().resolve()
@@ -92,7 +145,7 @@ def main() -> int:
         return 1
 
     try:
-        result = estimate_age(audio_path, args.model_path)
+        result = estimate_age(audio_path, args.model_path, fallback=not args.no_fallback)
     except Exception as exc:  # noqa: BLE001 - surface a clean CLI error
         print(f"age estimation failed: {exc}", file=sys.stderr)
         print("Did you run `make setup-age` and activate .venv-age?",

@@ -18,18 +18,22 @@ ROOT = Path(__file__).resolve().parents[1]
 OPENVOICE = ROOT / "OpenVoice-main"
 PYVIDEOTRANS = ROOT / "pyvideotrans-main"
 
-# Bridge scripts per engine. The split pipeline supports openvoice + qwen3-local.
+# Bridge scripts per engine. The split pipeline supports openvoice, qwen3-local
+# and omnivoice.
 BRIDGE_SCRIPTS = {
     "openvoice": ROOT / "bridge" / "openvoice_segment_tts.py",
     "qwen3-local": ROOT / "bridge" / "qwen3_segment_tts.py",
+    "omnivoice": ROOT / "bridge" / "omnivoice_segment_tts.py",
 }
 BRIDGE_VENVS = {
     "openvoice": OPENVOICE / ".venv" / "bin" / "python",
     "qwen3-local": PYVIDEOTRANS / ".venv" / "bin" / "python",
+    "omnivoice": Path(sys.executable),
 }
 BRIDGE_CWDS = {
     "openvoice": OPENVOICE,
     "qwen3-local": ROOT,
+    "omnivoice": ROOT,
 }
 
 
@@ -73,6 +77,8 @@ def main() -> int:
                              "duration at a rough speech rate before regenerating")
     parser.add_argument("--qwen3-model", default="",
                         help="Qwen3-TTS model path (only used with --tts-engine qwen3-local)")
+    parser.add_argument("--omnivoice-url", default="",
+                        help="OmniVoice server URL (only used with --tts-engine omnivoice)")
     args = parser.parse_args()
 
     if not args.job:
@@ -195,10 +201,18 @@ def main() -> int:
                 "--default-reference",
                 (ROOT / "voices" / "openvoice_default_reference.wav").as_posix(),
             ])
-        else:  # qwen3-local
+        elif engine == "qwen3-local":
             model = args.qwen3_model or ""
             if model:
                 cmd.extend(["--model", model])
+        else:  # omnivoice
+            if not args.omnivoice_url:
+                raise RuntimeError("--omnivoice-url is required with --tts-engine omnivoice")
+            cmd.extend([
+                "--api-url", args.omnivoice_url,
+                "--default-reference",
+                (ROOT / "voices" / "openvoice_default_reference.wav").as_posix(),
+            ])
         result = subprocess.run(cmd, cwd=bridge_cwd, text=True, capture_output=True)
         if result.returncode != 0:
             raise RuntimeError(f"bridge exited with code {result.returncode}: {result.stderr[-1200:]}")

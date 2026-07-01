@@ -192,6 +192,7 @@ dub:
 		echo "  For AI separation: VOCAL_SEPARATION_METHOD=demucs ALLOW_DEMUCS_DOWNLOAD=1"; \
 		echo "  DUCKING=1"; \
 		echo "  SPEAKER_PROFILING=1 DIARIZATION=pyannote TTS_ENGINE=openvoice"; \
+		echo "  For OmniVoice: TTS_ENGINE=omnivoice OMNIVOICE_URL=http://localhost:3900"; \
 		echo "  VERIFY_PITCH=1 FAIL_ON_PITCH_MISMATCH=1"; \
 		echo "  PREFER_EMBEDDED_SUBTITLES=1 (use embedded subs as text+timing source)"; \
 		exit 1; \
@@ -238,7 +239,9 @@ dub:
 		$(if $(FROM_STAGE),--from-stage $(FROM_STAGE)) \
 		$(if $(ONLY_SEGMENT),--only-segment $(ONLY_SEGMENT)) \
 		$(if $(SKIP_EXISTING),--skip-existing) \
-		$(if $(NO_CACHE),--no-cache)
+		$(if $(NO_CACHE),--no-cache) \
+		$(if $(OMNIVOICE_URL),--omnivoice-url $(OMNIVOICE_URL)) \
+		$(if $(TTS_SPEED),--tts-speed $(TTS_SPEED))
 
 # Build character_profiles.json from speaker_profiles.json.
 # Usage: make character-profiles PROFILES=tmp/job/speakers/speaker_profiles.json \

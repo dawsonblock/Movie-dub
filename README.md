@@ -206,7 +206,7 @@ Audio quality flags:
 | `--background-timeout` | `300` | FFmpeg timeout for background audio extraction (seconds) |
 | `--lufs-timeout` | `600` | FFmpeg timeout for LUFS normalization (seconds) |
 | `--fail-if-background-mix-fails` | off | Fail hard if background mixing fails instead of silently producing speech-only output |
-| `--tts-engine` | `openvoice` | `openvoice` (legacy) or `qwen3-local` (Apple Silicon, more natural) |
+| `--tts-engine` | `openvoice` | `openvoice` (legacy), `qwen3-local` (Apple Silicon, more natural), or `omnivoice` (server-based) |
 | `--base-speaker` | auto | OpenVoice base speaker: `EN-NEWEST`, `EN-US`, `EN-DEFAULT`, `EN-AU`, etc. |
 | `--qwen3-model` | `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16` | Local path or HF repo for Qwen3-TTS |
 
@@ -379,7 +379,7 @@ The wrapper supports three TTS engines via `--tts-engine`:
 |--------|----------|-------------|
 | `openvoice` | 34 | OpenVoice V2 local voice cloning (default) |
 | `qwen3-local` | 1 | Qwen3-TTS local built-in (Apple Silicon, MLX) |
-| `omnivoice` | 2 | OmniVoice local API (no bridge yet — not supported in split mode) |
+| `omnivoice` | 2 | OmniVoice server/Gradio API (split-mode bridge available) |
 
 ```bash
 make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 TTS_ENGINE=qwen3-local
@@ -399,7 +399,16 @@ make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 \
 Qwen3-local runs on the same python that runs `run_personal_dub.py`
 (`sys.executable`), NOT the OpenVoice or pyVideoTrans venvs. It is
 intentionally independent of OpenVoice — you do **not** need OpenVoice
-checkpoints installed to use `--tts-engine qwen3-local`.
+checkpoints installed to use `--tts-engine qwen3-local` or
+`--tts-engine omnivoice`.
+
+For OmniVoice you must start the server first, then pass its URL:
+
+```bash
+make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 \
+     SPEAKER_PROFILING=1 TTS_ENGINE=omnivoice \
+     OMNIVOICE_URL=http://localhost:3900
+```
 
 ```bash
 make setup-qwen3      # installs mlx-audio + soundfile + librosa + model
@@ -647,8 +656,9 @@ make regenerate JOB=<job_dir> SEGMENT=12 REMUX=1 SHORTEN=1
 make change-speaker JOB=<job_dir> FROM_SPEAKER=SPEAKER_00 TO_SPEAKER=SPEAKER_02
 ```
 
-`regenerate_segment.py` now supports `--tts-engine qwen3-local` (not just
-OpenVoice), `--change-speaker`, `--change-reference`, and `--shorten`.
+`regenerate_segment.py` now supports `--tts-engine qwen3-local` and
+`--tts-engine omnivoice` (not just OpenVoice), `--change-speaker`,
+`--change-reference`, and `--shorten`.
 
 ### Benchmark harness
 

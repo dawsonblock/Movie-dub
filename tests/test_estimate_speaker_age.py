@@ -152,16 +152,39 @@ class TestCliMain:
         audio = tmp_path / "test.wav"
         audio.write_bytes(b"fake audio")
         output = tmp_path / "out.json"
-        # Don't mock — the real import will fail since voice_age_regressor isn't installed
+        # Don't mock and disable fallback so the missing import fails hard.
+        monkeypatch.setattr(sys, "argv", [
+            "estimate_speaker_age.py",
+            "--audio", str(audio),
+            "--output", str(output),
+            "--no-fallback",
+        ])
+        ret = main()
+        assert ret == 1
+        err = capsys.readouterr().err
+        assert "age estimation failed" in err or "setup-age" in err
+
+    def test_fallback_when_model_unavailable(self, tmp_path, monkeypatch):
+        """Without the model and without --no-fallback, use pitch heuristic."""
+        audio = tmp_path / "test.wav"
+        # Minimal valid WAV header so librosa can attempt to read it.
+        audio.write_bytes(
+            b"RIFF\x26\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00"
+            b"\x80\x3e\x00\x00\x00\x7d\x00\x00\x02\x00\x10\x00data\x02\x00\x00\x00\x00\x00"
+        )
+        output = tmp_path / "out.json"
         monkeypatch.setattr(sys, "argv", [
             "estimate_speaker_age.py",
             "--audio", str(audio),
             "--output", str(output),
         ])
         ret = main()
-        assert ret == 1
-        err = capsys.readouterr().err
-        assert "age estimation failed" in err or "setup-age" in err
+        assert ret == 0
+        data = json.loads(output.read_text())
+        assert "band" in data
+        assert "estimated_years" in data
+        assert data.get("source") == "heuristic"
+        assert data.get("method") == "pitch_heuristic"
 
     def test_creates_output_parent_dir(self, tmp_path, mock_age_regressor, monkeypatch):
         _, mock_pipeline = mock_age_regressor

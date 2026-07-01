@@ -66,6 +66,28 @@ class TestRunPersonalDubFlags:
         out = _help_flags("run_personal_dub.py")
         assert "--no-cache" in out
 
+    def test_omnivoice_url_flag(self):
+        out = _help_flags("run_personal_dub.py")
+        assert "--omnivoice-url" in out
+
+    def test_tts_speed_flag(self):
+        out = _help_flags("run_personal_dub.py")
+        assert "--tts-speed" in out
+
+
+class TestOmniVoiceBridgeFlags:
+    def test_help(self):
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "bridge" / "omnivoice_segment_tts.py"), "--help"],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        out = result.stdout
+        assert "--queue-tts-file" in out
+        assert "--manifest-file" in out
+        assert "--api-url" in out
+        assert "--studio" in out
+
 
 class TestAnalyzeSpeakersFlags:
     def test_age_model_flag(self):
@@ -87,6 +109,11 @@ class TestRegenerateSegmentFlags:
         assert "--tts-engine" in out
         assert "openvoice" in out
         assert "qwen3-local" in out
+        assert "omnivoice" in out
+
+    def test_omnivoice_url_flag(self):
+        out = _help_flags("regenerate_segment.py")
+        assert "--omnivoice-url" in out
 
     def test_change_speaker_flag(self):
         out = _help_flags("regenerate_segment.py")
@@ -134,6 +161,10 @@ class TestEstimateSpeakerAgeFlags:
         assert "--audio" in out
         assert "--output" in out
         assert "--model-path" in out
+
+    def test_no_fallback_flag(self):
+        out = _help_flags("estimate_speaker_age.py")
+        assert "--no-fallback" in out
 
 
 class TestCharacterProfilesFlags:

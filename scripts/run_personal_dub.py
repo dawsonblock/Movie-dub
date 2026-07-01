@@ -798,7 +798,8 @@ def main() -> int:
     # --- Shared TTS options ---
     parser.add_argument("--tts-speed", type=float, default=1.0,
                         help="speech speed multiplier for engines that support "
-                             "it (default: 1.0)")
+                             "it (currently used by the OmniVoice bridge; "
+                             "default: 1.0)")
     # --- Post-generation pitch verification (Blocker 6) ---
     parser.add_argument("--verify-pitch", action="store_true",
                         help="run post-generation pitch verification against "

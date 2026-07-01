@@ -1,4 +1,4 @@
-.PHONY: doctor doctor-strict doctor-demucs doctor-checkpoints doctor-qwen3 setup-ffmpeg setup-pyvt setup-openvoice setup-qwen3 setup-checkpoints download-openvoice smoke-openvoice smoke-qwen3 smoke-e2e test test-unit test-verbose setup-dev test-openvoice test-pyvt dub proof proof-report generate-voices analyze-speakers verify-pitch clean
+.PHONY: doctor doctor-strict doctor-demucs doctor-checkpoints doctor-qwen3 setup-ffmpeg setup-pyvt setup-openvoice setup-qwen3 setup-omnivoice setup-checkpoints download-openvoice smoke-openvoice smoke-qwen3 smoke-e2e test test-unit test-verbose setup-dev test-openvoice test-pyvt dub proof proof-report generate-voices analyze-speakers verify-pitch clean
 
 doctor:
 	python3 scripts/doctor.py
@@ -87,6 +87,9 @@ setup-openvoice:
 
 setup-qwen3:
 	bash scripts/setup_qwen3_local.sh
+
+setup-omnivoice:
+	bash scripts/setup_omnivoice.sh
 
 setup-checkpoints:
 	python3 scripts/setup_openvoice_checkpoints.py

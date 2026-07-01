@@ -399,21 +399,25 @@ make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 \
 Qwen3-local runs on the same python that runs `run_personal_dub.py`
 (`sys.executable`), NOT the OpenVoice or pyVideoTrans venvs. It is
 intentionally independent of OpenVoice — you do **not** need OpenVoice
-checkpoints installed to use `--tts-engine qwen3-local` or
-`--tts-engine omnivoice`.
-
-For OmniVoice you must start the server first, then pass its URL:
-
-```bash
-make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 \
-     SPEAKER_PROFILING=1 TTS_ENGINE=omnivoice \
-     OMNIVOICE_URL=http://localhost:3900
-```
+checkpoints installed to use `--tts-engine qwen3-local`.
 
 ```bash
 make setup-qwen3      # installs mlx-audio + soundfile + librosa + model
 make doctor-qwen3     # probes imports + model presence
 make smoke-qwen3      # generates one real segment — the proof
+```
+
+#### OmniVoice setup (server-based)
+
+OmniVoice is a remote/server TTS engine. It also runs on the wrapper
+python (`sys.executable`), but it requires a running OmniVoice server.
+Install the bridge deps, start the server, then pass its URL:
+
+```bash
+make setup-omnivoice    # installs gradio_client + requests + soundfile
+make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 \
+     SPEAKER_PROFILING=1 TTS_ENGINE=omnivoice \
+     OMNIVOICE_URL=http://localhost:3900
 ```
 
 The default model is `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16`,

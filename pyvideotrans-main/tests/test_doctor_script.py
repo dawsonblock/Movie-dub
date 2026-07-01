@@ -34,26 +34,10 @@ def test_doctor_summary_strict_fails_on_optional_warnings():
     assert summary["optional_warnings"] == 1
 
 
-def test_doctor_rejects_lfs_pointer_checkpoint(tmp_path):
-    checkpoint = tmp_path / "checkpoint.pth"
-    checkpoint.write_text(
-        "version https://git-lfs.github.com/spec/v1\n"
-        "oid sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
-        "size 131320490\n",
-        encoding="utf-8",
-    )
-
-    result = doctor.converter_checkpoint_real_file_check(checkpoint)
-
-    assert result.ok is False
-    assert "pointer" in result.detail
-
-
-def test_doctor_rejects_suspiciously_small_checkpoint(tmp_path):
-    checkpoint = tmp_path / "checkpoint.pth"
-    checkpoint.write_bytes(b"PK\x03\x04small")
-
-    result = doctor.converter_checkpoint_real_file_check(checkpoint)
-
-    assert result.ok is False
-    assert "suspiciously small" in result.detail
+def test_doctor_qwen3_required_checks_present():
+    """Default doctor must include required Qwen3-local checks."""
+    checks = doctor.collect_checks()
+    qwen3_checks = [c for c in checks if c.section == "Qwen3"]
+    assert qwen3_checks, "expected Qwen3 checks"
+    for c in qwen3_checks:
+        assert c.required, f"Qwen3 check '{c.name}' should be required"

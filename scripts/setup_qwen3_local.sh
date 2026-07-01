@@ -17,8 +17,8 @@
 # What this downloads:
 #   mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16 -> models/Qwen3-TTS-12Hz-0.6B-Base-bf16
 #
-# This does NOT touch the OpenVoice or pyVideoTrans venvs. Qwen3-local
-# is intentionally independent of OpenVoice.
+# This does NOT touch the pyVideoTrans venv. Qwen3-local is intentionally
+# independent of pyVideoTrans transcription dependencies.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -79,7 +79,22 @@ print("Download complete.")
 PY
 fi
 
-# --- 4. Final summary ---
+# --- 4. Ensure a default reference WAV exists ---
+VOICES_DIR="$ROOT/voices"
+DEFAULT_REF="$VOICES_DIR/reference.wav"
+MALE_REF="$VOICES_DIR/male_reference.wav"
+if [ ! -f "$DEFAULT_REF" ]; then
+  mkdir -p "$VOICES_DIR"
+  if [ -f "$MALE_REF" ]; then
+    echo "Creating default reference from $MALE_REF ..."
+    cp "$MALE_REF" "$DEFAULT_REF"
+  else
+    echo "No reference WAV found at $DEFAULT_REF or $MALE_REF."
+    echo "Provide a reference.wav before running dubbing."
+  fi
+fi
+
+# --- 5. Final summary ---
 cat <<EOF
 
 Qwen3-local setup complete.
@@ -95,6 +110,5 @@ Next steps:
        SPEAKER_PROFILING=1 TTS_ENGINE=qwen3-local \\
        PREFER_EMBEDDED_SUBTITLES=1
 
-Qwen3-local is independent of OpenVoice. You do NOT need OpenVoice
-checkpoints installed to use --tts-engine qwen3-local.
+Qwen3-local is the default TTS engine for Movie-dub.
 EOF

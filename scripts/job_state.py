@@ -122,8 +122,8 @@ class JobPaths:
     def __init__(self, job_dir: Path) -> None:
         self.job_dir = job_dir
         self.input_dir = job_dir / "input"
-        self.openvoice_dir = job_dir / "openvoice"
-        self.segments_dir = job_dir / "openvoice" / "segments"
+        self.tts_dir = job_dir / "tts"
+        self.segments_dir = job_dir / "tts" / "segments"
         self.audio_dir = job_dir / "audio"
         self.video_dir = job_dir / "video"
         self.subtitles_dir = job_dir / "subtitles"
@@ -136,11 +136,11 @@ class JobPaths:
 
     @property
     def queue_file(self) -> Path:
-        return self.openvoice_dir / "queue.json"
+        return self.tts_dir / "queue.json"
 
     @property
     def manifest_file(self) -> Path:
-        return self.openvoice_dir / "manifest.json"
+        return self.tts_dir / "manifest.json"
 
     @property
     def dubbed_audio(self) -> Path:
@@ -184,21 +184,21 @@ class JobPaths:
 
     @property
     def generated_audio(self) -> Path:
-        return self.openvoice_dir / "segments"
+        return self.tts_dir / "segments"
 
     @property
     def pyvt_log(self) -> Path:
         return self.logs_dir / "pyvideotrans.log"
 
     @property
-    def openvoice_log(self) -> Path:
-        return self.logs_dir / "openvoice_bridge.log"
+    def tts_log(self) -> Path:
+        return self.logs_dir / "tts_bridge.log"
 
     def mkdirs(self) -> None:
         """Create all job subdirectories."""
         for d in (
             self.input_dir,
-            self.openvoice_dir,
+            self.tts_dir,
             self.segments_dir,
             self.audio_dir,
             self.video_dir,
@@ -235,8 +235,8 @@ def initial_job_state(
         },
         "paths": {
             "job_dir": job_dir,
-            "openvoice_queue": "",
-            "openvoice_manifest": "",
+            "tts_queue": "",
+            "tts_manifest": "",
             "dubbed_audio": "",
             "final_video": "",
             "review_segments": "",

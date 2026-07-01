@@ -458,16 +458,6 @@ class AppSettings:
             "multi_gpus": False,
             "retry_nums":1,
             "chattts_voice": ChatTTS_VOICE,
-            "openvoice_env_python": str(Path(ROOT_DIR).resolve().parent / "OpenVoice-main" / ".venv" / "bin" / "python"),
-            "openvoice_repo_path": str(Path(ROOT_DIR).resolve().parent / "OpenVoice-main"),
-            "openvoice_checkpoint_dir": str(Path(ROOT_DIR).resolve().parent / "OpenVoice-main" / "checkpoints_v2"),
-            "openvoice_default_reference": str(Path(ROOT_DIR).resolve().parent / "voices" / "openvoice_default_reference.wav"),
-            "openvoice_language": "",
-            "openvoice_base_speaker": "",
-            "openvoice_bridge_script": str(Path(ROOT_DIR).resolve().parent / "bridge" / "openvoice_segment_tts.py"),
-            "openvoice_device": "auto",
-            "openvoice_allow_partial": False,
-            "openvoice_preserve_dir": "",
             "proxy": ""
         }
 

@@ -23,10 +23,6 @@ run_personal_dub = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(run_personal_dub)
 
 
-def test_tts_engine_map_openvoice():
-    assert run_personal_dub.TTS_ENGINE_MAP["openvoice"] == "34"
-
-
 def test_tts_engine_map_qwen3_local():
     assert run_personal_dub.TTS_ENGINE_MAP["qwen3-local"] == "1"
 
@@ -37,12 +33,12 @@ def test_tts_engine_map_omnivoice():
 
 def test_tts_engine_map_has_all_choices():
     assert set(run_personal_dub.TTS_ENGINE_MAP.keys()) == {
-        "openvoice", "qwen3-local", "omnivoice"
+        "qwen3-local", "omnivoice"
     }
 
 
-def test_default_tts_engine_is_openvoice():
-    assert run_personal_dub.DEFAULT_TTS_ENGINE == "openvoice"
+def test_default_tts_engine_is_qwen3_local():
+    assert run_personal_dub.DEFAULT_TTS_ENGINE == "qwen3-local"
 
 
 def test_tts_engine_map_values_match_pyvideotrans_constants():
@@ -55,8 +51,8 @@ def test_tts_engine_map_values_match_pyvideotrans_constants():
     assert "QWEN3LOCAL_TTS = 1" in content
     # OMNIVOICE_TTS = 2
     assert "OMNIVOICE_TTS = 2" in content
-    # OPENVOICE_TTS = 34
-    assert "OPENVOICE_TTS = 34" in content
+    # OpenVoice (provider 34) was removed
+    assert "OPENVOICE_TTS = 34" not in content
 
 
 def test_manifest_enrichment_injects_speaker_id():
@@ -379,33 +375,26 @@ def test_split_pipeline_rejects_omnivoice(tmp_path):
     assert "not supported" in stderr or "omnivoice" in stderr
 
 
-def test_split_pipeline_rejects_qwen3_fallback(tmp_path):
-    """--fallback-tts-engine omnivoice + --speaker-profiling must fail.
-    (qwen3-local is now supported as a fallback, so we test omnivoice.)"""
+def test_split_pipeline_rejects_openvoice_fallback(tmp_path):
+    """--fallback-tts-engine openvoice must fail with the removal message."""
     rc, stderr = _run_main_with_args(
         ["--speaker-profiling",
-         "--tts-engine", "openvoice",
-         "--fallback-tts-engine", "omnivoice"],
+         "--tts-engine", "qwen3-local",
+         "--fallback-tts-engine", "openvoice"],
         tmp_path,
     )
-    assert rc != 0, "omnivoice fallback should be rejected in split mode"
-    assert "not supported" in stderr or "omnivoice" in stderr
+    assert rc != 0
+    assert "OpenVoice has been removed" in stderr, stderr
 
 
-def test_split_pipeline_accepts_openvoice(tmp_path):
-    """--tts-engine openvoice + --speaker-profiling must NOT be rejected
-    by the engine guard. It will fail later (no checkpoints, etc.) but
-    the guard message must not appear."""
+def test_split_pipeline_rejects_removed_openvoice(tmp_path):
+    """--tts-engine openvoice must fail with the removal message."""
     rc, stderr = _run_main_with_args(
         ["--speaker-profiling", "--tts-engine", "openvoice"],
         tmp_path,
     )
-    # rc may be non-zero from a later step (missing venv, etc.), but the
-    # engine guard message must NOT be in stderr.
-    assert "not supported" not in stderr, (
-        f"openvoice should not be rejected by engine guard, but stderr "
-        f"says: {stderr}"
-    )
+    assert rc != 0
+    assert "OpenVoice has been removed" in stderr, stderr
 
 
 def test_split_pipeline_accepts_qwen3_local(tmp_path):
@@ -495,7 +484,7 @@ def test_qwen3_bridge_resolve_reference(tmp_path):
 
 
 def test_qwen3_bridge_return_code_for_counts():
-    """Verify return code logic matches OpenVoice bridge."""
+    """Verify return code logic for the Qwen3 bridge."""
     assert qwen3_bridge.return_code_for_counts(5, 0, 0) == 0
     assert qwen3_bridge.return_code_for_counts(5, 1, 0) == 2
     assert qwen3_bridge.return_code_for_counts(5, 0, 1) == 2

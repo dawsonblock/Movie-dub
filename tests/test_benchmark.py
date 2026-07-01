@@ -82,7 +82,7 @@ def _make_fixture_job(tmp_path: Path) -> Path:
     job.mkdir()
 
     # Manifest with 3 ok + 1 error + 1 skipped
-    (job / "openvoice_manifest.json").write_text(json.dumps({
+    (job / "tts_manifest.json").write_text(json.dumps({
         "results": [
             {"id": 1, "status": "ok", "tts_seconds": 1.5,
              "generated_duration": 2.0, "target_duration": 2.1},
@@ -198,7 +198,7 @@ class TestCollectMetrics:
     def test_empty_manifest(self, tmp_path):
         job = tmp_path / "job"
         job.mkdir()
-        (job / "openvoice_manifest.json").write_text(json.dumps({"results": []}))
+        (job / "tts_manifest.json").write_text(json.dumps({"results": []}))
         (job / "review_segments.json").write_text(json.dumps([]))
         m = collect_metrics(job, 10.0, job / "final.mp4", {"_total": 5.0}, None, 0.5)
         assert m["segments_total"] == 0

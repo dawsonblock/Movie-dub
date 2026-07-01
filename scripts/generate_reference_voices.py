@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate male and female reference voice samples using MeloTTS.
 
-These are used as OpenVoice reference voices when gender is detected.
+These are used as TTS reference voices when gender is detected.
 The reference voice determines the timbre/character of the dubbed voice.
 """
 

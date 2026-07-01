@@ -9,7 +9,7 @@ it to the source speaker profile. Flag mismatches:
   - generated duration / target duration > 1.35 -> rewrite_shorter
 
 Inputs:
-  --manifest        openvoice_manifest.json (or enriched variant)
+  --manifest        tts_manifest.json (or enriched variant)
   --speaker-profiles speaker_profiles.json from analyze_speakers.py
   --output          pitch_verification.json
 
@@ -33,7 +33,7 @@ Output schema:
 
 Run inside the pyVideoTrans venv (has librosa + soundfile):
   pyvideotrans-main/.venv/bin/python scripts/verify_segment_pitch.py \
-    --manifest job/openvoice_manifest.json \
+    --manifest job/tts_manifest.json \
     --speaker-profiles job/speakers/speaker_profiles.json \
     --output job/pitch_verification.json
 """
@@ -142,7 +142,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Post-generation pitch verification"
     )
-    parser.add_argument("--manifest", required=True, help="openvoice manifest JSON")
+    parser.add_argument("--manifest", required=True, help="TTS manifest JSON")
     parser.add_argument("--speaker-profiles", required=True,
                         help="speaker_profiles.json from analyze_speakers.py")
     parser.add_argument("--output", required=True, help="output pitch_verification.json")

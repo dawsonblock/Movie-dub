@@ -362,9 +362,6 @@ def role_menu(tts_type, langcode=None) -> List:
         _list = params.get("clone_voicelist")
         return ['No'] if not isinstance(_list, list) else _list
 
-    if tts_type == tts.OPENVOICE_TTS:
-        return ['No', 'clone']
-
     if tts_type == tts.CHATTTS:
         return ['No'] + list(settings.ChatTTS_voicelist)
 

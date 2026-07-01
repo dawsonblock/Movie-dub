@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Build a single dubbed audio track from an OpenVoice manifest.
+"""Build a single dubbed audio track from a TTS manifest.
 
 Reads the manifest, places every successful segment WAV at its correct
 timestamp on a silent canvas the length of the input video, mixes the
 segments together, normalizes, and writes dubbed_audio.wav.
 
-Designed to run in either the OpenVoice venv (soundfile + numpy) or a
-plain Python with only the standard library (wave + array fallback).
+Designed to run in a plain Python with soundfile + numpy, or with only the
+standard library (wave + array fallback).
 """
 
 from __future__ import annotations
@@ -121,7 +121,6 @@ def resolve_output_audio(seg: dict, manifest_dir: Path) -> Path | None:
         seg.get("preserved_audio")
         or seg.get("output_audio")
         or seg.get("filename")
-        or seg.get("openvoice_output")
     )
     if not raw:
         return None
@@ -790,7 +789,7 @@ def build_dubbed_audio(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build dubbed audio from an OpenVoice manifest")
+    parser = argparse.ArgumentParser(description="Build dubbed audio from a TTS manifest")
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--input-video", required=True)
     parser.add_argument("--output-audio", required=True)

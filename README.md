@@ -1,12 +1,15 @@
 # Movie-dub
 
-Personal Mac dubbing workflow using pyVideoTrans for video orchestration and OpenVoice V2 for cloned segment audio.
+Personal Mac dubbing workflow using pyVideoTrans for video orchestration and Qwen3-TTS for local voice cloning.
 
 ## Status
 
 - Personal-use scaffold: yes
 - One-click app: no
 - Production-ready: no
+- Default engine: qwen3-local
+- OpenVoice: removed
+- Optional server engine: omnivoice
 - Commercial distribution: license review required because pyVideoTrans is GPLv3
 
 ## Licensing
@@ -15,7 +18,10 @@ This repository bundles multiple upstream projects with different licenses:
 
 - **Wrapper scripts** (`scripts/`, `bridge/`, `Makefile`): MIT
 - **pyVideoTrans** (`pyvideotrans-main/`): GPLv3
-- **OpenVoice** (`OpenVoice-main/`): Apache 2.0
+
+OpenVoice was previously bundled but has been removed from the wrapper scripts
+and default workflow. The remaining TTS engines are Qwen3-local (on-device) and
+OmniVoice (server-based).
 
 The root `LICENSE` file applies only to the original wrapper/orchestration
 code. Because pyVideoTrans is GPLv3, redistribution of the full bundle must
@@ -25,65 +31,39 @@ comply with GPLv3 terms. See `LICENSES.md` and `UPSTREAMS.md` for details.
 
 ## What this is
 
-This repo keeps the two runtimes isolated:
+This repo keeps the runtimes isolated:
 
 - `pyvideotrans-main`: transcription, translation, subtitles, timing, mixing, export
-- `OpenVoice-main`: local OpenVoice V2 voice conversion and MeloTTS base speech
-- `bridge/openvoice_segment_tts.py`: JSON/WAV subprocess boundary between them
+- Qwen3-local: on-device Qwen3-TTS voice cloning via `bridge/qwen3_segment_tts.py`
+- OmniVoice (optional): server-based TTS via `bridge/omnivoice_segment_tts.py`
 
-Do not merge OpenVoice into pyVideoTrans or install both stacks into one venv.
+Qwen3-local runs on the same Python interpreter as `run_personal_dub.py` and does
+not require a separate venv or server.
 
 ## Requirements
 
 - macOS with Python 3.10
 - local `ffmpeg` and `ffprobe`
 - `pyvideotrans-main/.venv`
-- `OpenVoice-main/.venv`
-- OpenVoice V2 checkpoints in `OpenVoice-main/checkpoints_v2`
-
-Expected checkpoint layout:
-
-```text
-OpenVoice-main/checkpoints_v2/
-  converter/
-    config.json
-    checkpoint.pth
-  base_speakers/
-    ses/
-      en-default.pth
-      en-newest.pth
-      en-us.pth
-      es.pth
-      fr.pth
-      jp.pth
-      kr.pth
-      zh.pth
-```
+- Qwen3-TTS model (`models/Qwen3-TTS-12Hz-0.6B-Base-bf16`)
+- a reference WAV for voice cloning (e.g. `voices/reference.wav`)
 
 ## Install
 
 ```bash
 make setup-ffmpeg
 make setup-pyvt
-make setup-openvoice
-make download-openvoice
+make setup-qwen3
 make doctor
+make smoke-qwen3
 ```
 
-Optional — Qwen3-TTS local engine (Apple Silicon, independent of OpenVoice):
+Optional extras:
 
 ```bash
-make setup-qwen3        # optional: better-quality TTS (Apple Silicon)
-make doctor-qwen3
-make smoke-qwen3
 make setup-age          # optional: trained age-regression model
 make smoke-age
 ```
-
-`qwen3-local` is strongly recommended over `openvoice` for voice quality: it
-uses the `mlx-community/Qwen3-TTS-0.6B` model directly on Apple Silicon and
-produces much more natural speech than OpenVoice V2's MeloTTS + voice-conversion
-pipeline.
 
 The default install does **not** require Demucs. Demucs is only needed for
 high-quality AI-based vocal separation. The default background extraction
@@ -92,7 +72,7 @@ uses an ffmpeg fallback (center-channel pan filter).
 - Default doctor: passes without Demucs installed.
 - `make doctor-demucs`: fails if Demucs is missing.
 - `make doctor-strict`: fails on any optional warning.
-- `make doctor-checkpoints`: checks only OpenVoice checkpoints.
+- `make doctor-qwen3`: checks only Qwen3-local readiness.
 
 Doctor flags:
 
@@ -101,23 +81,8 @@ python scripts/doctor.py                    # default: required checks only
 python scripts/doctor.py --need-demucs      # require Demucs
 python scripts/doctor.py --need-vocal-separation  # require Demucs
 python scripts/doctor.py --strict           # require everything
-python scripts/doctor.py --checkpoints-only # only check OpenVoice checkpoints
 python scripts/doctor.py --qwen3-only       # only check Qwen3-local engine
-python scripts/doctor.py --no-openvoice     # skip OpenVoice (pyVideoTrans-only)
 python scripts/doctor.py --json             # machine-readable readiness JSON
-```
-
-Checkpoints are not committed to git and are only downloaded when you explicitly run `make download-openvoice`.
-The default checkpoint repo is `rsxdalv/OpenVoiceV2`. To use a personal mirror or bucket:
-
-```bash
-OPENVOICE_HF_REPO=DmanBlock/OpenVoiceV2-bucket make download-openvoice
-```
-
-You can pin a known-good checkpoint revision:
-
-```bash
-OPENVOICE_HF_REVISION=<commit> make download-openvoice
 ```
 
 ## Smoke Tests
@@ -125,17 +90,14 @@ OPENVOICE_HF_REVISION=<commit> make download-openvoice
 Run these after install to confirm the runtime is ready:
 
 ```bash
-make smoke-openvoice
+make smoke-qwen3
 make smoke-e2e
-make smoke-qwen3     # only if you ran make setup-qwen3
-make test-pyvt
+make test
 ```
-
-The OpenVoice provider is registered in pyVideoTrans as provider `34`, displayed as `OpenVoice V2(Local)`.
 
 ## Unit Tests
 
-The `tests/` directory contains 238 pytest tests for the v0.12 modules (age
+The `tests/` directory contains pytest tests for the v0.12 modules (age
 model, cache/resume, character profiles, review loop, benchmark, CLI wiring,
 cache-wiring integration, voice-lock routing).
 They are lightweight and need no model dependencies.
@@ -168,14 +130,21 @@ before trying long videos.
 
 ```bash
 # Apple Silicon: use CPU_ONLY=1 if whisper-large-v3-turbo hits MPS OOM
-make dub INPUT=~/Movies/test.mp4 OUTPUT=~/Movies/dubbed-test.mp4 CPU_ONLY=1
+make dub INPUT=~/Movies/test.mp4 OUTPUT=~/Movies/test-dubbed.mp4 \
+     TTS_ENGINE=qwen3-local \
+     SPEAKER_PROFILING=1 \
+     CPU_ONLY=1 \
+     BACKGROUND_VOLUME=0.15 \
+     DUCKING=1 \
+     TARGET_LUFS=-16
 ```
 
 Optional flags:
 
 ```bash
 make dub INPUT=~/Movies/test.mp4 OUTPUT=~/Movies/dubbed-test.mp4 \
-     SOURCE_LANG=en TARGET_LANG=en REFERENCE=voices/openvoice_default_reference.wav \
+     TTS_ENGINE=qwen3-local SPEAKER_PROFILING=1 \
+     REFERENCE=voices/reference.wav \
      BACKGROUND_VOLUME=0.15 VOICE_VOLUME=1.2
 ```
 
@@ -186,8 +155,10 @@ python scripts/run_personal_dub.py \
   --input ~/Movies/test.mp4 \
   --source-language en \
   --target-language en \
-  --reference voices/openvoice_default_reference.wav \
+  --reference voices/reference.wav \
   --output ~/Movies/dubbed-test.mp4 \
+  --tts-engine qwen3-local \
+  --speaker-profiling \
   --background-volume 0.15 \
   --voice-volume 1.2
 ```
@@ -206,8 +177,7 @@ Audio quality flags:
 | `--background-timeout` | `300` | FFmpeg timeout for background audio extraction (seconds) |
 | `--lufs-timeout` | `600` | FFmpeg timeout for LUFS normalization (seconds) |
 | `--fail-if-background-mix-fails` | off | Fail hard if background mixing fails instead of silently producing speech-only output |
-| `--tts-engine` | `openvoice` | `openvoice` (legacy), `qwen3-local` (Apple Silicon, more natural), or `omnivoice` (server-based) |
-| `--base-speaker` | auto | OpenVoice base speaker: `EN-NEWEST`, `EN-US`, `EN-DEFAULT`, `EN-AU`, etc. |
+| `--tts-engine` | `qwen3-local` | `qwen3-local` (Qwen3/local) or `omnivoice` (server-based) |
 | `--qwen3-model` | `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16` | Local path or HF repo for Qwen3-TTS |
 
 **Note on `--voice-volume`:** With default peak normalization, increasing
@@ -224,16 +194,16 @@ For normal use, `--background-volume 0.15` is enough. For movies with music:
 
 ```bash
 make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 \
+     TTS_ENGINE=qwen3-local SPEAKER_PROFILING=1 \
      BACKGROUND_VOLUME=0.2 VOCAL_SEPARATION=1 DUCKING=1 TARGET_LUFS=-16
 ```
 
 This removes the original vocals from the background, ducks the music when
 speech is playing, and normalizes the final mix to streaming loudness.
 
-The wrapper runs the full pyVideoTrans VTV pipeline with OpenVoice, then
-rebuilds the dubbed audio track from the manifest and remuxes it into the
-final MP4. Job artifacts (manifest, segment WAVs, dubbed audio, review,
-remux command, report, job.json) are kept under
+The split-pipeline wrapper builds the dubbed audio track from the manifest
+and remuxes it into the final MP4. Job artifacts (manifest, segment WAVs,
+dubbed audio, review, remux command, report, job.json) are kept under
 `pyvideotrans-main/tmp/personal_dub/<job_id>/`.
 
 ### Speaker profiling (multi-character scenes)
@@ -259,12 +229,6 @@ pyVideoTrans venv. `CHARACTER_PROFILES=1` writes `character_profiles.json`
 with named, reviewable characters (and respects `voice_locked`).
 `CPU_ONLY=1` is recommended on Apple Silicon for the initial Whisper pass
 because `whisper-large-v3-turbo` can exhaust MPS memory.
-
-**TTS engine choice:** `TTS_ENGINE=qwen3-local` (Apple Silicon) gives the most
-natural, human-sounding voice. `TTS_ENGINE=openvoice` is the legacy option; if
-you use it, you can experiment with `BASE_SPEAKER=EN-NEWEST` (or
-`EN-DEFAULT`, `EN-US`, `EN-AU`, `EN-BR`, `EN-INDIA`) to find the least
-robotic base voice for your clip.
 
 #### Where the text comes from: subtitles vs. ASR
 
@@ -302,7 +266,7 @@ found:
 ```bash
 make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 \
      SPEAKER_PROFILING=1 PREFER_EMBEDDED_SUBTITLES=1 \
-     TTS_ENGINE=openvoice
+     TTS_ENGINE=qwen3-local
 ```
 
 `scripts/extract_embedded_subtitles.py` handles stream discovery and
@@ -373,13 +337,12 @@ make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 \
 
 ### TTS engine selection
 
-The wrapper supports three TTS engines via `--tts-engine`:
+The wrapper supports two TTS engines via `--tts-engine`:
 
 | Engine | Provider | Description |
 |--------|----------|-------------|
-| `openvoice` | 34 | OpenVoice V2 local voice cloning (default) |
-| `qwen3-local` | 1 | Qwen3-TTS local built-in (Apple Silicon, MLX) |
-| `omnivoice` | 2 | OmniVoice server/Gradio API (split-mode bridge available) |
+| `qwen3-local` | 1 | Qwen3-TTS local on-device (Apple Silicon, MLX) — default |
+| `omnivoice` | 2 | OmniVoice server/Gradio API (split-mode bridge) |
 
 ```bash
 make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 TTS_ENGINE=qwen3-local
@@ -391,15 +354,19 @@ fallback. `make doctor` reports which engines are ready.
 
 ```bash
 make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 \
-     TTS_ENGINE=qwen3-local FALLBACK_TTS_ENGINE=openvoice
+     TTS_ENGINE=qwen3-local FALLBACK_TTS_ENGINE=omnivoice
 ```
 
-#### Qwen3-local setup (independent of OpenVoice)
+#### Qwen3-local setup
 
-Qwen3-local runs on the same python that runs `run_personal_dub.py`
-(`sys.executable`), NOT the OpenVoice or pyVideoTrans venvs. It is
-intentionally independent of OpenVoice — you do **not** need OpenVoice
-checkpoints installed to use `--tts-engine qwen3-local`.
+Qwen3-local is the default engine and is required for the default install.
+It runs on the same Python that runs `run_personal_dub.py`
+(`sys.executable`), not a separate venv. The default model is
+`mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16`, which includes the
+`speech_tokenizer/` subdir required by mlx-audio's `post_load_hook`.
+**Do not** use the `aufklarer/...-MLX-4bit` repo — it is the Base talker
+only and is missing the speech tokenizer, so `model.generate()` fails
+with `ValueError: Speech tokenizer not loaded`.
 
 ```bash
 make setup-qwen3      # installs mlx-audio + soundfile + librosa + model
@@ -407,10 +374,16 @@ make doctor-qwen3     # probes imports + model presence
 make smoke-qwen3      # generates one real segment — the proof
 ```
 
+`make smoke-qwen3` is the real proof: it loads the model, clones the
+default reference voice, writes a 24 kHz WAV, and checks it is
+non-empty and non-silent. The Qwen3 bridge API (`load_model` →
+`model.generate(text, ref_audio, ref_text, ...)` → `results[0].audio`)
+is validated by this smoke test on each Mac before use.
+
 #### OmniVoice setup (server-based)
 
 OmniVoice is a remote/server TTS engine. It also runs on the wrapper
-python (`sys.executable`), but it requires a running OmniVoice server.
+Python (`sys.executable`), but it requires a running OmniVoice server.
 Install the bridge deps, start the server, then pass its URL:
 
 ```bash
@@ -419,18 +392,6 @@ make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 \
      SPEAKER_PROFILING=1 TTS_ENGINE=omnivoice \
      OMNIVOICE_URL=http://localhost:3900
 ```
-
-The default model is `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16`,
-which includes the `speech_tokenizer/` subdir required by mlx-audio's
-`post_load_hook`. **Do not** use the `aufklarer/...-MLX-4bit` repo —
-it is the Base talker only and is missing the speech tokenizer, so
-`model.generate()` fails with `ValueError: Speech tokenizer not loaded`.
-
-`make smoke-qwen3` is the real proof: it loads the model, clones the
-default reference voice, writes a 24 kHz WAV, and checks it is
-non-empty and non-silent. The Qwen3 bridge API (`load_model` →
-`model.generate(text, ref_audio, ref_text, ...)` → `results[0].audio`)
-is validated by this smoke test on each Mac before use.
 
 ### Job directory safety
 
@@ -475,8 +436,8 @@ pipeline. If you request `--sample-rate 48000`, the output will be 48000 Hz.
 
 ### Proof report
 
-`make proof` writes a machine-readable `reports/proof_report.json` with
-the result of every check (doctor, smoke tests, pyVideoTrans tests). This
+`make proof` writes a machine-readable `reports/proof_qwen3_report.json` with
+the result of every check (doctor, smoke tests, unit tests). This
 file is written even on failure, so you can inspect which check failed.
 
 ## Regenerate a Segment
@@ -488,6 +449,7 @@ python scripts/regenerate_segment.py \
   --job-dir pyvideotrans-main/tmp/personal_dub/<job_id> \
   --segment-id 3 \
   --text "Corrected shorter line." \
+  --tts-engine qwen3-local \
   --remux
 ```
 
@@ -660,9 +622,9 @@ make regenerate JOB=<job_dir> SEGMENT=12 REMUX=1 SHORTEN=1
 make change-speaker JOB=<job_dir> FROM_SPEAKER=SPEAKER_00 TO_SPEAKER=SPEAKER_02
 ```
 
-`regenerate_segment.py` now supports `--tts-engine qwen3-local` and
-`--tts-engine omnivoice` (not just OpenVoice), `--change-speaker`,
-`--change-reference`, and `--shorten`.
+`regenerate_segment.py` supports `--tts-engine qwen3-local` and
+`--tts-engine omnivoice`, `--change-speaker`, `--change-reference`, and
+`--shorten`.
 
 ### Benchmark harness
 
@@ -690,7 +652,7 @@ composite quality score (0–100). The report is written to
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | `make doctor` fails on Demucs | Demucs not installed | Demucs is optional; default doctor should pass. Use `make doctor-demucs` only if you need it. |
-| `make doctor` fails on checkpoints | OpenVoice V2 checkpoints missing | Run `make download-openvoice` |
+| `make doctor` fails on qwen3-local | Qwen3-TTS model missing or deps not installed | Run `make setup-qwen3` and `make doctor-qwen3` |
 | `make doctor` fails on ffmpeg/ffprobe | ffmpeg not installed | Run `make setup-ffmpeg` |
 | Job dir already exists error | `--job-dir` points to existing dir | Use `--force-overwrite-job-dir` (only works for marked dirs under `tmp/personal_dub/`) |
 | Demucs fallback to ffmpeg | Demucs not installed, crashed, or model not cached | Install Demucs + `--allow-demucs-download`, or accept ffmpeg fallback (check `build_audio_report.json`) |
@@ -698,11 +660,9 @@ composite quality score (0–100). The report is written to
 | LUFS output has wrong sample rate | Old version used default 44100 | Fixed: LUFS now preserves the selected sample rate |
 | Final MP4 missing audio stream | Remux produced bad output | Verification now catches this; check `verification` in report |
 | Segment regeneration didn't update video | `--remux` not passed | Always pass `--remux` to rebuild audio + video |
-| `proof_report.json` says fail | One of the proof checks failed | Read the `failed_check` field in the report |
+| `proof_qwen3_report.json` says fail | One of the proof checks failed | Read the `failed_check` field in the report |
 | Review says "ok" for failed segment | Old version ignored manifest status | Fixed: review now propagates manifest `status` field |
-| Bridge crashes on torch.load | Checkpoint is LFS pointer or corrupted | Bridge now validates checkpoints before loading; run `make download-openvoice` |
-| `--allow-partial` not working | Old version didn't wire it to provider | Fixed: `openvoice_allow_partial` now set in config |
-| Config pollution after run | Old version restored missing keys as empty strings | Fixed: missing keys are now removed on restore |
+| Bridge crashes on model.generate | Wrong Qwen3-TTS repo used | Use `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16` (has speech_tokenizer subdir) |
 
 ## Mac Acceptance Checklist
 
@@ -713,23 +673,23 @@ Before considering the build ready, verify all of these on macOS:
 make clean
 make setup-ffmpeg
 make setup-pyvt
-make setup-openvoice
-make download-openvoice
+make setup-qwen3
 
 # 2. Doctor passes (without Demucs)
 make doctor
 
 # 3. Proof passes and writes a report
 make proof
-cat reports/proof_report.json   # result must be "pass"
+cat reports/proof_qwen3_report.json   # result must be "pass"
 
 # 4. Dub a test clip
 make dub INPUT=~/Movies/test-90s.mp4 OUTPUT=~/Movies/test-90s-dubbed.mp4 \
+     TTS_ENGINE=qwen3-local SPEAKER_PROFILING=1 \
      BACKGROUND_VOLUME=0.15 VOICE_VOLUME=1.1 DUCKING=1 TARGET_LUFS=-16
 
 # 5. Verify job artifacts exist
 ls pyvideotrans-main/tmp/personal_dub/*/job.json
-ls pyvideotrans-main/tmp/personal_dub/*/openvoice_manifest.json
+ls pyvideotrans-main/tmp/personal_dub/*/tts_manifest.json
 ls pyvideotrans-main/tmp/personal_dub/*/review_segments.json
 ls pyvideotrans-main/tmp/personal_dub/*/dubbed_audio.wav
 ls pyvideotrans-main/tmp/personal_dub/*/final_dubbed.mp4
@@ -742,6 +702,7 @@ python scripts/regenerate_segment.py \
   --job-dir <latest-job-dir> \
   --segment-id 1 \
   --text "replacement test line" \
+  --tts-engine qwen3-local \
   --remux
 
 # 8. Check regeneration report
@@ -750,7 +711,7 @@ cat <latest-job-dir>/regeneration_report.json
 
 - `make doctor` passes without Demucs installed
 - `make doctor-demucs` fails if Demucs is missing
-- `reports/proof_report.json` exists and says `pass`
+- `reports/proof_qwen3_report.json` exists and says `pass`
 - `job.json` exists in every job directory
 - Final MP4 has both video and audio streams
 - Duration is close to original (within 2s or 2%)
@@ -761,6 +722,6 @@ cat <latest-job-dir>/regeneration_report.json
 ## Notes
 
 - `make doctor` is the source of truth for missing local setup.
-- Missing lines are treated as failure by default: `openvoice_allow_partial` defaults to `false`.
-- OpenVoice timing is recorded in each manifest with duration ratios and timing status.
-- Generated outputs, venvs, model caches, checkpoints, and local ffmpeg binaries are intentionally ignored.
+- Missing lines are treated as failure by default: `allow_partial` defaults to `false`.
+- Qwen3 timing is recorded in each manifest with duration ratios and timing status.
+- Generated outputs, venvs, model caches, and local ffmpeg binaries are intentionally ignored.

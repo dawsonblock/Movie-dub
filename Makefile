@@ -1,10 +1,10 @@
-.PHONY: doctor doctor-strict doctor-demucs doctor-checkpoints doctor-qwen3 setup-ffmpeg setup-pyvt setup-openvoice setup-qwen3 setup-omnivoice setup-checkpoints download-openvoice smoke-openvoice smoke-qwen3 smoke-e2e test test-unit test-verbose setup-dev test-openvoice test-pyvt dub proof proof-report generate-voices analyze-speakers verify-pitch clean
+.PHONY: doctor doctor-strict doctor-demucs doctor-qwen3 setup-ffmpeg setup-pyvt setup-qwen3 setup-omnivoice smoke-qwen3 smoke-e2e test test-unit test-verbose setup-dev test-pyvt dub proof proof-report analyze-speakers verify-pitch clean character-profiles character-rename character-lock character-review regenerate failed-segments change-speaker benchmark cache-stats age-model-status setup-age doctor-age smoke-age
 
 doctor:
 	python3 scripts/doctor.py
 
 # Remove generated reports and proof artifacts. Does NOT delete venvs,
-# checkpoints, or job directories (use --force-overwrite-job-dir for those).
+# models, or job directories (use --force-overwrite-job-dir for those).
 clean:
 	rm -rf reports
 	rm -f /tmp/movie-dub-doctor.out /tmp/movie-dub-proof/checks.json
@@ -16,16 +16,13 @@ doctor-strict:
 doctor-demucs:
 	python3 scripts/doctor.py --need-demucs
 
-doctor-checkpoints:
-	python3 scripts/doctor.py --checkpoints-only
-
 doctor-qwen3:
 	python3 scripts/doctor.py --qwen3-only
 
 # Run all four pass gates in sequence. All must pass.
 # Note: doctor output is redirected to a file first, then tailed,
 # so the doctor exit code is not masked by the pipe to tail.
-# A machine-readable proof_report.json is always written (Blocker 7).
+# A machine-readable proof_qwen3_report.json is always written.
 proof:
 	@rm -rf reports && mkdir -p reports /tmp/movie-dub-proof
 	@echo "=== 1/4 doctor ==="
@@ -34,47 +31,47 @@ proof:
 		python3 scripts/write_proof_report.py --result fail \
 			--failed-check doctor \
 			--message "doctor failed; see /tmp/movie-dub-doctor.out" \
-			--output reports/proof_report.json; \
+			--output reports/proof_qwen3_report.json; \
 		exit 1; \
 	}
 	@tail -3 /tmp/movie-dub-doctor.out
 	@echo '{"doctor": "pass"}' > /tmp/movie-dub-proof/checks.json
-	@echo "=== 2/4 smoke-openvoice ===" && python3 scripts/smoke_openvoice_bridge.py || { \
+	@echo "=== 2/4 smoke-qwen3 ===" && python3 scripts/smoke_qwen3.py || { \
 		python3 scripts/write_proof_report.py --result fail \
-			--failed-check openvoice_smoke \
-			--message "smoke_openvoice_bridge failed" \
+			--failed-check qwen3_smoke \
+			--message "smoke_qwen3 failed" \
 			--checks-json /tmp/movie-dub-proof/checks.json \
-			--output reports/proof_report.json; \
+			--output reports/proof_qwen3_report.json; \
 		exit 1; \
 	}
-	@python3 -c "import json; d=json.load(open('/tmp/movie-dub-proof/checks.json')); d['openvoice_smoke']='pass'; json.dump(d, open('/tmp/movie-dub-proof/checks.json','w'))"
-	@echo "=== 3/4 smoke-e2e ===" && python3 scripts/smoke_e2e_short_clip.py || { \
+	@python3 -c "import json; d=json.load(open('/tmp/movie-dub-proof/checks.json')); d['qwen3_smoke']='pass'; json.dump(d, open('/tmp/movie-dub-proof/checks.json','w'))"
+	@echo "=== 3/4 e2e smoke ===" && python3 scripts/smoke_e2e_short_clip.py --tts-engine qwen3-local || { \
 		python3 scripts/write_proof_report.py --result fail \
-			--failed-check audio_builder_smoke \
-			--message "smoke_e2e_short_clip failed" \
+			--failed-check e2e_smoke \
+			--message "smoke_e2e_short_clip --tts-engine qwen3-local failed" \
 			--checks-json /tmp/movie-dub-proof/checks.json \
-			--output reports/proof_report.json; \
+			--output reports/proof_qwen3_report.json; \
 		exit 1; \
 	}
-	@python3 -c "import json; d=json.load(open('/tmp/movie-dub-proof/checks.json')); d['audio_builder_smoke']='pass'; d['remux_smoke']='pass'; json.dump(d, open('/tmp/movie-dub-proof/checks.json','w'))"
-	@echo "=== 4/4 test-pyvt ===" && cd pyvideotrans-main && .venv/bin/python -m pytest -q || { \
+	@python3 -c "import json; d=json.load(open('/tmp/movie-dub-proof/checks.json')); d['e2e_smoke']='pass'; json.dump(d, open('/tmp/movie-dub-proof/checks.json','w'))"
+	@echo "=== 4/4 unit tests ===" && python3 -m pytest tests/ -q || { \
 		python3 scripts/write_proof_report.py --result fail \
-			--failed-check pyvideotrans_tests \
-			--message "pyVideoTrans pytest failed" \
+			--failed-check unit_tests \
+			--message "pytest failed" \
 			--checks-json /tmp/movie-dub-proof/checks.json \
-			--output reports/proof_report.json; \
+			--output reports/proof_qwen3_report.json; \
 		exit 1; \
 	}
-	@python3 -c "import json; d=json.load(open('/tmp/movie-dub-proof/checks.json')); d['pyvideotrans_tests']='pass'; json.dump(d, open('/tmp/movie-dub-proof/checks.json','w'))"
+	@python3 -c "import json; d=json.load(open('/tmp/movie-dub-proof/checks.json')); d['unit_tests']='pass'; json.dump(d, open('/tmp/movie-dub-proof/checks.json','w'))"
 	@python3 scripts/write_proof_report.py --result pass \
 		--checks-json /tmp/movie-dub-proof/checks.json \
-		--output reports/proof_report.json
+		--output reports/proof_qwen3_report.json
 	@echo ""
 	@echo "PROOF: PASS"
-	@echo "Proof report: reports/proof_report.json"
+	@echo "Proof report: reports/proof_qwen3_report.json"
 
 proof-report:
-	@cat reports/proof_report.json
+	@cat reports/proof_qwen3_report.json
 
 setup-ffmpeg:
 	bash scripts/setup_ffmpeg_mac.sh
@@ -82,23 +79,11 @@ setup-ffmpeg:
 setup-pyvt:
 	bash scripts/setup_pyvideotrans_mac.sh
 
-setup-openvoice:
-	bash scripts/setup_openvoice_mac.sh
-
 setup-qwen3:
 	bash scripts/setup_qwen3_local.sh
 
 setup-omnivoice:
 	bash scripts/setup_omnivoice.sh
-
-setup-checkpoints:
-	python3 scripts/setup_openvoice_checkpoints.py
-
-download-openvoice:
-	bash scripts/download_openvoice_v2_checkpoints.sh
-
-smoke-openvoice:
-	python3 scripts/smoke_openvoice_bridge.py
 
 smoke-qwen3:
 	python3 scripts/smoke_qwen3.py
@@ -132,15 +117,8 @@ test-verbose:
 	}
 	python3 -m pytest tests/ -v --tb=short
 
-test-openvoice:
-	cd pyvideotrans-main && .venv/bin/python -m pytest tests/test_openvoice_bridge.py -q
-
 test-pyvt:
 	cd pyvideotrans-main && .venv/bin/python -m pytest
-
-generate-voices:
-	@echo "Generating male and female reference voices..."
-	@cd OpenVoice-main && .venv/bin/python ../scripts/generate_reference_voices.py
 
 # Speaker profiling: diarization + per-speaker reference extraction.
 # Usage:
@@ -161,7 +139,7 @@ analyze-speakers:
 
 # Post-generation pitch verification.
 # Usage:
-#   make verify-pitch MANIFEST=tmp/job/openvoice_manifest.json \
+#   make verify-pitch MANIFEST=tmp/job/tts_manifest.json \
 #     PROFILES=tmp/job/speakers/speaker_profiles.json \
 #     OUTPUT=tmp/job/pitch_verification.json
 verify-pitch:
@@ -183,9 +161,9 @@ verify-pitch:
 #           BACKGROUND_TIMEOUT=900 LUFS_TIMEOUT=1200 FAIL_IF_BACKGROUND_MIX_FAILS=1
 #           DEMUCS_TIMEOUT=900 ALLOW_DEMUCS_DOWNLOAD=1
 #           SPEAKER_PROFILING=1 DIARIZATION=pyannote NUM_SPEAKERS=auto
-#           TTS_ENGINE=openvoice FALLBACK_TTS_ENGINE=none
+#           TTS_ENGINE=qwen3-local FALLBACK_TTS_ENGINE=none
 #           VERIFY_PITCH=1 FAIL_ON_PITCH_MISMATCH=1
-#           PREFER_EMBEDDED_SUBTITLES=1 (NO_OCR_IMAGE_SUBS=1 to skip OCR)
+#           PREFER_EMBEDDED_SUBTITLES=1 (use embedded subs as text+timing source)
 #           RESUME=1 FROM_STAGE=tts ONLY_SEGMENT=42 SKIP_EXISTING=1 NO_CACHE=1
 dub:
 	@if [ -z "$(INPUT)" ] || [ -z "$(OUTPUT)" ]; then \
@@ -194,7 +172,7 @@ dub:
 		echo "  BACKGROUND_VOLUME=0.15 VOCAL_SEPARATION=1 VOCAL_SEPARATION_METHOD=ffmpeg"; \
 		echo "  For AI separation: VOCAL_SEPARATION_METHOD=demucs ALLOW_DEMUCS_DOWNLOAD=1"; \
 		echo "  DUCKING=1"; \
-		echo "  SPEAKER_PROFILING=1 DIARIZATION=pyannote TTS_ENGINE=openvoice"; \
+		echo "  SPEAKER_PROFILING=1 DIARIZATION=pyannote TTS_ENGINE=qwen3-local"; \
 		echo "  For OmniVoice: TTS_ENGINE=omnivoice OMNIVOICE_URL=http://localhost:3900"; \
 		echo "  VERIFY_PITCH=1 FAIL_ON_PITCH_MISMATCH=1"; \
 		echo "  PREFER_EMBEDDED_SUBTITLES=1 (use embedded subs as text+timing source)"; \
@@ -262,7 +240,7 @@ character-profiles:
 
 # Rename / lock / review a character in character_profiles.json.
 # Usage: make character-rename PROFILE_FILE=<cp.json> CHAR_ID=CHAR_001 CHAR_NAME="Alice"
-#        make character-lock PROFILE_FILE=<cp.json> CHAR_ID=CHAR_001 REF=voices/alice.wav
+#        make character-lock PROFILE_FILE=<cp.json> CHAR_ID=CHAR_001 REF=voices/x.wav
 #        make character-review PROFILE_FILE=<cp.json> CHAR_ID=CHAR_001 STATUS=approved
 character-rename:
 	@if [ -z "$(PROFILE_FILE)" ] || [ -z "$(CHAR_ID)" ] || [ -z "$(CHAR_NAME)" ]; then \
@@ -288,7 +266,7 @@ character-review:
 regenerate:
 	@if [ -z "$(JOB)" ] || [ -z "$(SEGMENT)" ]; then \
 		echo "Usage: make regenerate JOB=<job_dir> SEGMENT=<id> [REMUX=1]"; \
-		echo "  TTS_ENGINE=openvoice CHANGE_SPEAKER=SPEAKER_01 CHANGE_REF=<wav> SHORTEN=1"; \
+		echo "  TTS_ENGINE=qwen3-local CHANGE_SPEAKER=SPEAKER_01 CHANGE_REF=<wav> SHORTEN=1"; \
 		exit 1; \
 	fi
 	python3 scripts/regenerate_segment.py \
@@ -306,7 +284,7 @@ failed-segments:
 	@if [ -z "$(JOB)" ]; then echo "Usage: make failed-segments JOB=<job_dir>"; exit 1; fi
 	python3 scripts/review_loop.py failed \
 		--review "$(JOB)/review_segments.json" \
-		--manifest "$(JOB)/openvoice_manifest.json" \
+		--manifest "$(JOB)/tts_manifest.json" \
 		--pitch-verification "$(JOB)/pitch_verification.json" \
 		--output "$(JOB)/failed_segments.json"
 
@@ -342,7 +320,7 @@ benchmark:
 		--name $(or $(RUN_NAME),bench) \
 		--target-language $(or $(TARGET_LANG),en) \
 		--source-language $(or $(SOURCE_LANG),auto) \
-		--tts-engine $(or $(TTS_ENGINE),openvoice) \
+		--tts-engine $(or $(TTS_ENGINE),qwen3-local) \
 		$(if $(SPEAKER_PROFILING),--speaker-profiling) \
 		$(if $(DIARIZATION),--diarization $(DIARIZATION)) \
 		$(if $(NUM_SPEAKERS),--num-speakers $(NUM_SPEAKERS)) \

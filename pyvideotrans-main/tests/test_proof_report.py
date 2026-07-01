@@ -17,7 +17,7 @@ def test_proof_report_pass_structure(tmp_path):
     """Proof report on pass should have all required fields (Blocker 7)."""
     checks = {
         "doctor": "pass",
-        "openvoice_smoke": "pass",
+        "qwen3_smoke": "pass",
         "audio_builder_smoke": "pass",
         "remux_smoke": "pass",
         "pyvideotrans_tests": "pass",
@@ -40,13 +40,13 @@ def test_proof_report_pass_structure(tmp_path):
 def test_proof_report_fail_includes_failed_check(tmp_path):
     """Proof report on fail should include failed_check and message (Blocker 7)."""
     report = write_proof.build_proof_report(
-        checks={"doctor": "pass", "openvoice_smoke": "fail"},
+        checks={"doctor": "pass", "qwen3_smoke": "fail"},
         result="fail",
-        failed_check="openvoice_smoke",
+        failed_check="qwen3_smoke",
         message="smoke test failed",
     )
     assert report["result"] == "fail"
-    assert report["failed_check"] == "openvoice_smoke"
+    assert report["failed_check"] == "qwen3_smoke"
     assert report["message"] == "smoke test failed"
 
 

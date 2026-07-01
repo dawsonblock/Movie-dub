@@ -47,7 +47,6 @@ CAMB_TTS = 30
 G_TTS = 31
 CONFUCIUS_TTS = 32
 TTS_API = 33
-OPENVOICE_TTS = 34
 
 
 # 支持克隆的渠道
@@ -65,8 +64,7 @@ SUPPORT_CLONE = [
     CAMB_TTS,
     OMNIVOICE_TTS,
     MOSS_TTS,
-    CONFUCIUS_TTS,
-    OPENVOICE_TTS
+    CONFUCIUS_TTS
 ]
 
 
@@ -114,8 +112,7 @@ _ID_NAME_DICT = {
     CAMB_TTS: ChannelProvider("CAMB AI TTS", "._cambtts", key_name="camb_api_key", win="cambtts"),
     G_TTS: ChannelProvider(f"gTTS({tr('free')})", "._gtts"),
     CONFUCIUS_TTS: ChannelProvider(f"Confucius-TTS({tr('Local')}API)", "._confuciustts",key_name="confuciustts_url", win="f5tts"),
-    TTS_API: ChannelProvider(tr("Customize API"), "._ttsapi", key_name="ttsapi_url", win="ttsapi"),
-    OPENVOICE_TTS: ChannelProvider(f"OpenVoice V2({tr('Local')})", "._openvoice")
+    TTS_API: ChannelProvider(tr("Customize API"), "._ttsapi", key_name="ttsapi_url", win="ttsapi")
 }
 # 强制保持按照每个常量值大小排序
 _ID_NAME_DICT=dict(sorted(_ID_NAME_DICT.items(),key=lambda item:item[0]))
@@ -148,11 +145,9 @@ def is_allow_lang(langcode: str = None, tts_type: int = None):
     #Arabic, Danish, German, Greek, English, Spanish, Finnish, French, Hebrew, Hindi, Italian, Japanese, Korean, Malay, Dutch, Norwegian, Polish, Portuguese, Russian, Swedish, Swahili, Turkish, Chinese
     if tts_type==CHATTERBOX_TTS and langcode[:2] not in ["zh","yu","en","de","es","fr","ja","it","ko","ru","ar","pl","pt","sv","el","tr","da","he",'hi',"ms","nl","nb"]:
         return name + tr('Dubbing channel') + tr('may not support') + tr(langcode)
-    if tts_type==CONFUCIUS_TTS and langcode[:2] not in ["zh", "en", "ja", "ko", "de", "fr", "th", 
+    if tts_type==CONFUCIUS_TTS and langcode[:2] not in ["zh", "en", "ja", "ko", "de", "fr", "th",
     "id", "vi", "es", "pt", "it", "ru", "ms"]:
         return name + tr('Dubbing channel') + tr('may not support') + tr(langcode)
-    if tts_type == OPENVOICE_TTS and langcode[:2] not in ["en", "es", "fr", "zh", "ja", "ko"]:
-        return name + tr('Dubbing channel') + ' ' + tr('Only support') + tr(["en", "es", "fr", "zh", "ja", "ko"])
     return True
 
 

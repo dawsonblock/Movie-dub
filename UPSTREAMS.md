@@ -12,23 +12,6 @@ terms when using or redistributing this bundle.
   timing, mixing, and export orchestration.
 - **Local path:** `pyvideotrans-main/`
 
-## OpenVoice
-
-- **Repository:** https://github.com/myshell-ai/OpenVoice
-- **License:** Apache 2.0 (see `OpenVoice-main/LICENSE`)
-- **Purpose:** Local voice cloning and tone color conversion using
-  OpenVoice V2. Also includes MeloTTS for base speech synthesis.
-- **Local path:** `OpenVoice-main/`
-
-## OpenVoice V2 Checkpoints
-
-- **Repository:** https://huggingface.co/rsxdalv/OpenVoiceV2
-- **License:** Refer to the upstream model card.
-- **Purpose:** Pre-trained OpenVoice V2 converter and base speaker
-  embeddings.
-- **Local path:** `OpenVoice-main/checkpoints_v2/` (not committed; downloaded
-  via `make download-openvoice`)
-
 ## ffmpeg / ffprobe
 
 - **Repository:** https://ffmpeg.org/
@@ -49,25 +32,14 @@ They are minimal and safe — re-apply them after updating pyVideoTrans.
 
 ### `videotrans/tts/__init__.py`
 
-No patches. We only read the provider index constants (`OPENVOICE_TTS=34`,
-`QWEN3LOCAL_TTS=1`, `OMNIVOICE_TTS=2`) and the `SUPPORT_CLONE` list.
+No patches. We only read the provider index constants (`QWEN3LOCAL_TTS=1`,
+`OMNIVOICE_TTS=2`) and the `SUPPORT_CLONE` list.
 
 ### `videotrans/process/prepare_audio.py`
 
 No patches. We reuse `pyannote_speakers()` and `built_speakers()` from
 `scripts/analyze_speakers.py` via direct import. The upstream functions
 are called as-is.
-
-### `videotrans/task/trans_create.py`
-
-**Planned patch (not yet applied):** `_create_ref_from_vocal()` currently
-cuts a fresh `clone-{i}.wav` from the vocal track for every clone segment.
-When speaker profiling is active, `run_personal_dub.py` pre-places
-canonical per-speaker reference WAVs. The patch will add a 3-line guard to
-skip cutting if `ref_wav` already exists. This is not yet needed because
-the current wiring uses `line_roles` + `openvoice_default_reference` rather
-than the clone path. The patch becomes necessary when we switch to
-per-segment reference routing through the clone role.
 
 ### `cli.py`
 
@@ -85,3 +57,11 @@ will need to be added.
 - **Used by:** `scripts/analyze_speakers.py` (via `--diarization pyannote`)
 - **Token:** Set `HF_TOKEN` env var or pass `--hf-token`. The token is
   NOT committed to the repo.
+
+## Qwen3-TTS model
+
+- **Repository:** https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16
+- **License:** Refer to the upstream model card.
+- **Purpose:** On-device TTS voice cloning for the `qwen3-local` engine.
+- **Local path:** `models/Qwen3-TTS-12Hz-0.6B-Base-bf16` (downloaded by
+  `make setup-qwen3`, not committed to git).

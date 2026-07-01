@@ -152,9 +152,9 @@ def collect_metrics(
     confidence_threshold: float,
 ) -> dict:
     """Read job artifacts and compute the benchmark metrics dict."""
-    manifest = _read_json(job_dir / "openvoice_manifest.json") or {}
+    manifest = _read_json(job_dir / "tts_manifest.json") or {}
     # Try the enriched manifest first (has speaker_id per result).
-    enriched = _read_json(job_dir / "openvoice_manifest_enriched.json")
+    enriched = _read_json(job_dir / "tts_manifest_enriched.json")
     if enriched:
         manifest = enriched
     speaker_profiles = _read_json(job_dir / "speakers" / "speaker_profiles.json") or {}
@@ -477,8 +477,8 @@ def main() -> int:
                         help="benchmark name (recorded in the report)")
     parser.add_argument("--source-language", default="auto")
     parser.add_argument("--target-language", default="en")
-    parser.add_argument("--tts-engine", default="openvoice",
-                        choices=["openvoice", "qwen3-local", "omnivoice"])
+    parser.add_argument("--tts-engine", default="qwen3-local",
+                        choices=["qwen3-local", "omnivoice"])
     parser.add_argument("--speaker-profiling", action="store_true")
     parser.add_argument("--diarization", default="pyannote")
     parser.add_argument("--num-speakers", default="auto")

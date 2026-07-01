@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Generate per-speaker TTS segment WAV files with OmniVoice.
 
-This script is the OmniVoice equivalent of openvoice_segment_tts.py and
-qwen3_segment_tts.py. It accepts the same --queue-tts-file / --manifest-file
-interface so the split pipeline in run_personal_dub.py can use it as a
-drop-in replacement.
+This script is the OmniVoice TTS bridge for the split pipeline. It accepts
+the same --queue-tts-file / --manifest-file interface as qwen3_segment_tts.py
+so run_personal_dub.py can use it as a drop-in replacement.
 
 OmniVoice is a remote/server TTS engine. Two modes are supported:
 
@@ -23,9 +22,9 @@ Dependencies:
 
 Example:
     python bridge/omnivoice_segment_tts.py \
-        --queue-tts-file tmp/job/openvoice_queue.json \
-        --manifest-file tmp/job/openvoice_manifest.json \
-        --work-dir tmp/job/openvoice_work \
+        --queue-tts-file tmp/job/tts_queue.json \
+        --manifest-file tmp/job/tts_manifest.json \
+        --work-dir tmp/job/tts_work \
         --api-url http://localhost:3900 \
         --language en
 """
@@ -390,8 +389,7 @@ def synthesize_segments(args: argparse.Namespace) -> int:
             item.get("text") or item.get("target_text") or ""
         ).strip()
         output_audio = (
-            item.get("openvoice_output")
-            or item.get("output_audio")
+            item.get("output_audio")
             or item.get("filename")
         )
         start_s, end_s = segment_times_seconds(item)

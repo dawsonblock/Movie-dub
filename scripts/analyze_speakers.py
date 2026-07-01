@@ -317,8 +317,8 @@ def _clip_quality_score(
             low_noise = 0.9
         else:
             low_noise = 0.2
-    except ImportError:
-        # No librosa: rely on diarization + length only.
+    except (ImportError, FileNotFoundError, Exception):
+        # No librosa or audio unavailable: rely on diarization + length only.
         pass
 
     # Weighted blend. Voiced ratio + single-speaker dominate because they

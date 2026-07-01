@@ -107,9 +107,9 @@ class TestRegenerateSegmentFlags:
     def test_tts_engine_flag(self):
         out = _help_flags("regenerate_segment.py")
         assert "--tts-engine" in out
-        assert "openvoice" in out
         assert "qwen3-local" in out
         assert "omnivoice" in out
+        assert "openvoice" not in out
 
     def test_omnivoice_url_flag(self):
         out = _help_flags("regenerate_segment.py")

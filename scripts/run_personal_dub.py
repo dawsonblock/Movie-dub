@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Dub a personal video end-to-end with pyVideoTrans + OpenVoice V2.
+"""Dub a personal video end-to-end with pyVideoTrans + Qwen3-local.
 
-This is the user-facing CLI promised in Phase 10. It runs the full
-pyVideoTrans VTV pipeline with the OpenVoice provider, then rebuilds
-the dubbed audio track from the OpenVoice manifest and remuxes it into
-a final dubbed MP4 at the requested output path.
+This is the user-facing CLI promised in Phase 10. It runs the split
+pyVideoTrans pipeline (STT -> STS -> speaker profiling -> direct TTS bridge)
+with the Qwen3-local TTS provider as the default engine, then rebuilds the
+dubbed audio track from the TTS manifest and remuxes it into a final dubbed
+MP4 at the requested output path. OmniVoice is also available as an optional
+alternative TTS engine.
 
 Workflow:
-  1. Validate inputs (video, reference WAV, venvs, checkpoints).
-  2. Point OpenVoice segment preservation at a job generated_audio dir.
-  3. Run pyVideoTrans cli.py --task vtv --tts_type 34.
-  4. Locate the OpenVoice manifest + preserved segment WAVs.
+  1. Validate inputs (video, reference WAV, venvs, Qwen3 deps).
+  2. Run pyVideoTrans cli.py --task stt and --task sts for subtitles.
+  3. Run analyze_speakers.py for per-speaker profiling + ref audio.
+  4. Run the direct TTS bridge (qwen3-local or omnivoice) with per-speaker
+     ref_wav routing.
   5. Build dubbed_audio.wav from the manifest.
   6. Remux into the final output MP4.
   7. Write review_segments.json + remux_command.json for regeneration.
@@ -21,7 +24,7 @@ Example:
     --input ~/Movies/test.mp4 \
     --source-language en \
     --target-language en \
-    --reference voices/openvoice_default_reference.wav \
+    --reference voices/male_reference.wav \
     --output ~/Movies/dubbed-test.mp4
 """
 
@@ -75,8 +78,9 @@ from review_loop import write_failed_segments as _write_failed_segments
 
 ROOT = Path(__file__).resolve().parents[1]
 PYVIDEOTRANS = ROOT / "pyvideotrans-main"
-OPENVOICE = ROOT / "OpenVoice-main"
-DEFAULT_REFERENCE = ROOT / "voices" / "openvoice_default_reference.wav"
+# New default reference: prefer a neutral reference.wav if present, otherwise
+# fall back to the male reference, or finally a generated reference file.
+DEFAULT_REFERENCE = ROOT / "voices" / "reference.wav"
 MALE_REFERENCE = ROOT / "voices" / "male_reference.wav"
 FEMALE_REFERENCE = ROOT / "voices" / "female_reference.wav"
 BUILD_AUDIO_SCRIPT = ROOT / "scripts" / "build_dubbed_audio_from_manifest.py"
@@ -86,11 +90,9 @@ ANALYZE_SPEAKERS_SCRIPT = ROOT / "scripts" / "analyze_speakers.py"
 EXTRACT_SUBTITLES_SCRIPT = ROOT / "scripts" / "extract_embedded_subtitles.py"
 VERIFY_PITCH_SCRIPT = ROOT / "scripts" / "verify_segment_pitch.py"
 PYVT_CONFIG = PYVIDEOTRANS / "videotrans" / "cfg.json"
-PRESERVE_KEY = "openvoice_preserve_dir"
 HUGGINGFACE_ASR_PROVIDER = "4"  # HuggingFace ASR for whisper-large-v3-turbo
 
 # Bridge scripts for the split pipeline
-OPENVOICE_BRIDGE_SCRIPT = ROOT / "bridge" / "openvoice_segment_tts.py"
 QWEN3_BRIDGE_SCRIPT = ROOT / "bridge" / "qwen3_segment_tts.py"
 OMNIVOICE_BRIDGE_SCRIPT = ROOT / "bridge" / "omnivoice_segment_tts.py"
 
@@ -104,15 +106,13 @@ QWEN3_DEFAULT_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16"
 QWEN3_LOCAL_MODEL = ROOT / "models" / "Qwen3-TTS-12Hz-0.6B-Base-bf16"
 
 # TTS engine -> pyVideoTrans provider index (videotrans/tts/__init__.py)
-# openvoice   -> 34 (OpenVoice V2 local, current default)
-# qwen3-local -> 1  (Qwen3-TTS local built-in)
-# omnivoice   -> 2  (OmniVoice local API)
+# qwen3-local -> 1 (Qwen3-TTS local built-in, default)
+# omnivoice   -> 2 (OmniVoice local API)
 TTS_ENGINE_MAP = {
-    "openvoice": "34",
     "qwen3-local": "1",
     "omnivoice": "2",
 }
-DEFAULT_TTS_ENGINE = "openvoice"
+DEFAULT_TTS_ENGINE = "qwen3-local"
 
 
 def die(msg: str, code: int = 1) -> int:
@@ -363,7 +363,7 @@ def build_queue_tts_with_speakers(
     Each queue item gets:
       - line: 1-based line number
       - text: translated text
-      - role: "clone" (so OpenVoice provider knows to use ref_wav)
+      - role: "clone" (so the TTS bridge knows to use ref_wav)
       - ref_wav: path to the speaker's reference.wav
       - start_time / end_time: in milliseconds (pyVideoTrans convention)
       - filename: output WAV path in cache_folder
@@ -418,7 +418,6 @@ def build_queue_tts_with_speakers(
             "pitch": pitch,
             "tts_type": tts_type,
             "filename": f"{cache_folder}/dubb-{idx}-{_key}.wav",
-            "openvoice_output": f"{cache_folder}/dubb-{idx}-{_key}.wav-openvoice.wav",
         })
     return queue
 
@@ -429,7 +428,7 @@ def _tts_model_id(engine: str, args) -> str:
         return args.qwen3_model
     if engine == "omnivoice":
         return f"omnivoice-{args.omnivoice_url}"
-    return "openvoice-v2"
+    return "none"
 
 
 def _compute_segment_cache_keys(
@@ -479,18 +478,6 @@ def _compute_segment_cache_keys(
     return keys
 
 
-def latest_manifest(start_time: float) -> Path | None:
-    return latest_artifact(PYVIDEOTRANS / "tmp", start_time, "**/openvoice-manifest-*.json")
-
-
-def latest_queue(start_time: float) -> Path | None:
-    return latest_artifact(PYVIDEOTRANS / "tmp", start_time, "**/openvoice-queue-*.json")
-
-
-def latest_srt(start_time: float) -> Path | None:
-    """Find the most recently created SRT file in the pyVideoTrans tmp root."""
-    # pyVideoTrans writes SRTs to tmp/ with names like faster-YYYYMMDD-HH_MM_SS.srt
-    return latest_artifact(PYVIDEOTRANS / "tmp", start_time, "**/*.srt")
 
 
 def run_subprocess(cmd: list[str], cwd: Path, label: str,
@@ -501,66 +488,6 @@ def run_subprocess(cmd: list[str], cwd: Path, label: str,
         print(result.stdout)
     if result.stderr:
         print(result.stderr, file=sys.stderr)
-    return result
-
-
-def run_openvoice_bridge_direct(
-    queue_tts: list[dict],
-    manifest_path: Path,
-    queue_path: Path,
-    work_dir: Path,
-    logs_path: Path,
-    preserve_dir: Path,
-    openvoice_python: Path,
-    bridge_script: Path,
-    openvoice_repo: Path,
-    checkpoint_dir: Path,
-    language: str = "EN",
-    device: str = "auto",
-    allow_partial: bool = False,
-    base_speaker: str = "",
-) -> subprocess.CompletedProcess:
-    """Run the OpenVoice bridge directly with a pre-built queue_tts.
-
-    This bypasses pyVideoTrans's TTS layer entirely, giving us full control
-    over per-speaker ref_wav routing. Each queue item must have a 'ref_wav'
-    or 'voice_reference' key pointing to the speaker's reference.wav.
-    """
-    queue_path.parent.mkdir(parents=True, exist_ok=True)
-    queue_path.write_text(
-        json.dumps(queue_tts, ensure_ascii=False), encoding="utf-8",
-    )
-    work_dir.mkdir(parents=True, exist_ok=True)
-    preserve_dir.mkdir(parents=True, exist_ok=True)
-
-    cmd = [
-        openvoice_python.as_posix(),
-        bridge_script.as_posix(),
-        "--queue-tts-file", queue_path.as_posix(),
-        "--manifest-file", manifest_path.as_posix(),
-        "--work-dir", work_dir.as_posix(),
-        "--openvoice-repo", openvoice_repo.as_posix(),
-        "--checkpoint-dir", checkpoint_dir.as_posix(),
-        "--language", language,
-        "--logs-file", logs_path.as_posix(),
-        "--preserve-dir", preserve_dir.as_posix(),
-    ]
-    if device:
-        cmd.extend(["--device", device])
-    if base_speaker:
-        cmd.extend(["--base-speaker", base_speaker])
-    env = dict(os.environ)
-    env["PYTHONPATH"] = (
-        openvoice_repo.as_posix() + os.pathsep + env.get("PYTHONPATH", "")
-    )
-    result = run_subprocess(cmd, openvoice_repo, "openvoice-bridge-direct", env=env)
-    # Bridge returns exit code 2 for partial success (some segments ok, some
-    # failed). When allow_partial is True, treat exit code 2 as success (0).
-    if allow_partial and result.returncode == 2:
-        print("OpenVoice bridge: partial success (exit 2) accepted via --allow-partial")
-        return subprocess.CompletedProcess(
-            args=result.args, returncode=0, stdout=result.stdout, stderr=result.stderr,
-        )
     return result
 
 
@@ -580,8 +507,7 @@ def run_qwen3_bridge_direct(
 ) -> subprocess.CompletedProcess:
     """Run the Qwen3-TTS bridge directly with a pre-built queue_tts.
 
-    This is the Qwen3 equivalent of run_openvoice_bridge_direct. It uses
-    mlx-audio for on-device Apple Silicon inference with per-speaker
+    Uses mlx-audio for on-device Apple Silicon inference with per-speaker
     voice cloning via ref_audio.
     """
     queue_path.parent.mkdir(parents=True, exist_ok=True)
@@ -664,8 +590,16 @@ def run_omnivoice_bridge_direct(
 
 
 def main() -> int:
+    # Reject the removed OpenVoice engine with a clear message before argparse
+    # gets a chance to emit a generic "invalid choice" error.
+    for i, arg in enumerate(sys.argv[1:], start=1):
+        if arg.startswith("--tts-engine=openvoice") or arg.startswith("--fallback-tts-engine=openvoice"):
+            return die("OpenVoice has been removed. Use --tts-engine qwen3-local or omnivoice.")
+        if arg in ("--tts-engine", "--fallback-tts-engine") and i + 1 < len(sys.argv):
+            if sys.argv[i + 1] == "openvoice":
+                return die("OpenVoice has been removed. Use --tts-engine qwen3-local or omnivoice.")
     parser = argparse.ArgumentParser(
-        description="Dub a personal video with pyVideoTrans + OpenVoice V2"
+        description="Dub a personal video with pyVideoTrans + Qwen3-local + optional OmniVoice"
     )
     parser.add_argument("--input", required=True,
                         help="absolute path to the input video (MP4)")
@@ -674,7 +608,7 @@ def main() -> int:
     parser.add_argument("--target-language", default="en",
                         help="target language code (e.g. en, es, zh-cn)")
     parser.add_argument("--reference", default="",
-                        help="reference voice WAV for OpenVoice cloning "
+                        help="reference voice WAV for TTS cloning "
                              "(default: auto-detect gender)")
     parser.add_argument("--output", required=True,
                         help="absolute path for the final dubbed MP4")
@@ -775,15 +709,11 @@ def main() -> int:
     # --- TTS engine selection (Blocker 4) ---
     parser.add_argument("--tts-engine", choices=list(TTS_ENGINE_MAP.keys()),
                         default=DEFAULT_TTS_ENGINE,
-                        help="primary TTS engine (default: openvoice)")
+                        help="primary TTS engine (default: qwen3-local)")
     parser.add_argument("--fallback-tts-engine",
                         choices=list(TTS_ENGINE_MAP.keys()) + ["none"],
                         default="none",
                         help="fallback TTS engine if primary fails (default: none)")
-    # --- OpenVoice options (only used when --tts-engine openvoice) ---
-    parser.add_argument("--base-speaker", default="",
-                        help="OpenVoice base speaker (e.g. EN-US, EN-NEWEST, "
-                             "EN-DEFAULT). Empty = first available speaker.")
     # --- Qwen3-TTS options (only used when --tts-engine qwen3-local) ---
     parser.add_argument("--qwen3-model", default=QWEN3_DEFAULT_MODEL,
                         help=f"Qwen3-TTS model path or HF repo ID "
@@ -862,50 +792,39 @@ def main() -> int:
         return die(f"input video missing: {input_video}")
     if not py_python.is_file():
         return die(f"pyVideoTrans venv python missing: {py_python}")
-    # OpenVoice is required only when it is actually in use. The original
-    # VTV pipeline always uses OpenVoice (provider 34), so it is required
-    # there. The split pipeline (--speaker-profiling) routes TTS through a
-    # direct bridge; OpenVoice is only required there when it is the
-    # primary or fallback engine. Qwen3-local-only runs must NOT be
-    # blocked by a missing OpenVoice install.
-    use_split_pipeline_pre = bool(args.speaker_profiling or args.speaker_profile_json)
+    # The split pipeline is used whenever the user asks for speaker
+    # profiling or selects a TTS engine that only works with the bridge
+    # (qwen3-local, omnivoice).
+    use_split_pipeline_pre = bool(
+        args.speaker_profiling
+        or args.speaker_profile_json
+        or args.tts_engine in {"qwen3-local", "omnivoice"}
+    )
     # --prefer-embedded-subtitles only has effect in the split pipeline
-    # (Step 0 lives inside the split-pipeline block). Reject it in VTV
-    # mode rather than silently ignoring it.
+    # (Step 0 lives inside the split-pipeline block). Since the split
+    # pipeline is always used, this check is retained for safety.
     if args.prefer_embedded_subtitles and not use_split_pipeline_pre:
         return die(
             "--prefer-embedded-subtitles requires --speaker-profiling "
             "(or --speaker-profile-json). The embedded-subtitle extraction "
-            "step is part of the split pipeline; the VTV pipeline manages "
-            "its own subtitles internally."
+            "step is part of the split pipeline; only speaker-profiling "
+            "mode supports it."
         )
-    openvoice_in_use = (
-        not use_split_pipeline_pre
-        or args.tts_engine == "openvoice"
-        or args.fallback_tts_engine == "openvoice"
-    )
-    if openvoice_in_use:
-        if not (OPENVOICE / ".venv" / "bin" / "python").is_file():
-            return die(f"OpenVoice venv python missing: {OPENVOICE / '.venv' / 'bin' / 'python'}")
-        if not (OPENVOICE / "checkpoints_v2" / "converter" / "checkpoint.pth").is_file():
-            return die("OpenVoice checkpoints missing. Run: make download-openvoice")
     # Qwen3-local pre-flight (only when it is the primary or fallback
     # engine). The bridge runs on sys.executable, so the required
     # packages (mlx_audio, soundfile, librosa) must be importable from
     # this python. The model must also be resolvable.
     qwen3_in_use = (
-        use_split_pipeline_pre
-        and (args.tts_engine == "qwen3-local"
-             or args.fallback_tts_engine == "qwen3-local")
+        args.tts_engine == "qwen3-local"
+        or args.fallback_tts_engine == "qwen3-local"
     )
     if qwen3_in_use:
         qwen3_err = _qwen3_preflight(args.qwen3_model)
         if qwen3_err:
             return die(qwen3_err)
     omnivoice_in_use = (
-        use_split_pipeline_pre
-        and (args.tts_engine == "omnivoice"
-             or args.fallback_tts_engine == "omnivoice")
+        args.tts_engine == "omnivoice"
+        or args.fallback_tts_engine == "omnivoice"
     )
     if omnivoice_in_use:
         ov_err = _omnivoice_preflight(args.omnivoice_url)
@@ -939,8 +858,15 @@ def main() -> int:
             )
         detected_gender = "female"
     else:
-        # Auto-detect gender from the original audio
-        reference = DEFAULT_REFERENCE
+        # Auto-detect gender from the original audio.
+        # Prefer a neutral reference.wav if it exists; otherwise fall back to
+        # the male reference. Gender detection may override this.
+        if DEFAULT_REFERENCE.is_file():
+            reference = DEFAULT_REFERENCE
+        elif MALE_REFERENCE.is_file():
+            reference = MALE_REFERENCE
+        else:
+            reference = DEFAULT_REFERENCE
         if GENDER_DETECT_SCRIPT.is_file():
             print("Detecting speaker gender from audio...")
             try:
@@ -963,7 +889,10 @@ def main() -> int:
             except Exception as e:
                 print(f"  gender detection failed: {e}, using default reference")
         if not reference.is_file():
-            reference = DEFAULT_REFERENCE
+            if MALE_REFERENCE.is_file():
+                reference = MALE_REFERENCE
+            else:
+                reference = DEFAULT_REFERENCE
         if not reference.is_file():
             return die(
                 f"reference WAV missing: {reference}. "
@@ -1026,10 +955,8 @@ def main() -> int:
             )
         except UnsafeJobDirError as exc:
             return die(str(exc))
-    output_dir = job_dir / "output"
-    output_dir.mkdir(parents=True, exist_ok=True)
     generated_audio = job_dir / "generated_audio"
-    stable_manifest = job_dir / "openvoice_manifest.json"
+    stable_manifest = job_dir / "tts_manifest.json"
     dubbed_audio = job_dir / "dubbed_audio.wav"
     report_path = job_dir / "report.json"
     job_json_path = job_dir / "job.json"
@@ -1045,64 +972,54 @@ def main() -> int:
     subtitles_dir.mkdir(parents=True, exist_ok=True)
     job_srt = subtitles_dir / "translated.srt"
 
-    # Job-scoped explicit paths (Blocker 5): pass exact file paths to the
-    # OpenVoice provider so we never need global mtime scanning.
-    openvoice_queue = job_dir / "openvoice_queue.json"
-    openvoice_manifest_explicit = job_dir / "openvoice_manifest_explicit.json"
-    openvoice_logs = job_dir / "openvoice_bridge.log"
-    openvoice_work = job_dir / "openvoice_work"
+    # Job-scoped explicit paths (Blocker 5): pass exact file paths to the TTS
+    # bridge so we never need global mtime scanning.
+    tts_queue = job_dir / "tts_queue.json"
+    tts_manifest_explicit = job_dir / "tts_manifest_explicit.json"
+    tts_logs = job_dir / "tts_bridge.log"
+    tts_work = job_dir / "tts_work"
     # Speaker profiling outputs (v0.8)
     speakers_dir = job_dir / "speakers"
     speaker_profiles_path = speakers_dir / "speaker_profiles.json"
     pitch_verification_path = job_dir / "pitch_verification.json"
-    enriched_manifest_path = job_dir / "openvoice_manifest_enriched.json"
+    enriched_manifest_path = job_dir / "tts_manifest_enriched.json"
     # Character profiles output (v0.12)
     character_profiles_path = job_dir / "character_profiles.json"
 
     # --- Speaker profiling setup (v0.9: split pipeline) ---
-    # When --speaker-profiling is on, we use a SPLIT pipeline:
+    # We always use the SPLIT pipeline:
     #   1. STT (cli.py --task stt) → source SRT with real segment timings
     #   2. STS (cli.py --task sts) → translated SRT
     #   3. analyze_speakers.py --segments-json → speaker_profiles.json with
     #      real segment_assignments (matched to actual SRT timings)
-    #   4. Direct OpenVoice bridge with per-speaker ref_wav
+    #   4. Direct TTS bridge (qwen3-local or omnivoice) with per-speaker ref_wav
     #   5. Build dubbed audio + remux (existing code)
-    #
-    # When --speaker-profiling is off, we use the original VTV pipeline.
     #
     # If a profile is already provided via --speaker-profile-json, we still
     # need the source SRT to validate segment_assignments. If the profile has
     # no segment_assignments, we fail hard (v0.9: no more fake progress).
     speaker_profiles_data: dict | None = None
-    use_split_pipeline = bool(args.speaker_profiling or args.speaker_profile_json)
-    if use_split_pipeline:
-        # The split pipeline uses bridge scripts directly for per-speaker
-        # ref_wav routing. Only engines with a bridge implementation are
-        # The split pipeline uses bridge scripts directly for per-speaker
-        # ref_wav routing. Only engines with a bridge implementation are
-        # supported here.
-        SUPPORTED_SPLIT_ENGINES = {"openvoice", "qwen3-local", "omnivoice"}
-        if args.tts_engine not in SUPPORTED_SPLIT_ENGINES:
-            return die(
-                f"--tts-engine '{args.tts_engine}' is not supported in "
-                f"speaker-profiling mode. The split pipeline requires a "
-                f"bridge script for per-speaker ref_wav routing, but "
-                f"'{args.tts_engine}' has no bridge implementation. "
-                f"Either drop --speaker-profiling / --speaker-profile-json "
-                f"to use the VTV pipeline (which supports all engines), or "
-                f"use --tts-engine openvoice, --tts-engine qwen3-local, or "
-                f"--tts-engine omnivoice. "
-                f"Supported engines in split mode: "
-                f"{', '.join(sorted(SUPPORTED_SPLIT_ENGINES))}."
-            )
-        if args.fallback_tts_engine != "none" and args.fallback_tts_engine not in SUPPORTED_SPLIT_ENGINES:
-            return die(
-                f"--fallback-tts-engine '{args.fallback_tts_engine}' is not "
-                f"supported in speaker-profiling mode for the same reason. "
-                f"Use --fallback-tts-engine none, openvoice, qwen3-local, or "
-                f"omnivoice. "
-                f"Supported: {', '.join(sorted(SUPPORTED_SPLIT_ENGINES))}."
-            )
+    use_split_pipeline = bool(
+        args.speaker_profiling
+        or args.speaker_profile_json
+        or args.tts_engine in {"qwen3-local", "omnivoice"}
+    )
+    # The split pipeline uses bridge scripts directly for per-speaker ref_wav
+    # routing. Only engines with a bridge implementation are supported.
+    SUPPORTED_SPLIT_ENGINES = {"qwen3-local", "omnivoice"}
+    if args.tts_engine not in SUPPORTED_SPLIT_ENGINES:
+        return die(
+            f"--tts-engine '{args.tts_engine}' is not supported. "
+            f"Only engines with a split-pipeline bridge implementation are "
+            f"available: {', '.join(sorted(SUPPORTED_SPLIT_ENGINES))}."
+        )
+    if args.fallback_tts_engine != "none" and args.fallback_tts_engine not in SUPPORTED_SPLIT_ENGINES:
+        return die(
+            f"--fallback-tts-engine '{args.fallback_tts_engine}' is not "
+            f"supported. Use --fallback-tts-engine none, qwen3-local, or "
+            f"omnivoice. "
+            f"Supported: {', '.join(sorted(SUPPORTED_SPLIT_ENGINES))}."
+        )
         speakers_dir.mkdir(parents=True, exist_ok=True)
         if args.speaker_profile_json:
             src_profile = Path(args.speaker_profile_json).expanduser().resolve()
@@ -1122,9 +1039,9 @@ def main() -> int:
         job_dir=job_dir.as_posix(),
     )
     job_state["paths"].update({
-        "openvoice_manifest": stable_manifest.as_posix(),
-        "openvoice_queue": openvoice_queue.as_posix(),
-        "openvoice_logs": openvoice_logs.as_posix(),
+        "tts_manifest": stable_manifest.as_posix(),
+        "tts_queue": tts_queue.as_posix(),
+        "tts_logs": tts_logs.as_posix(),
         "dubbed_audio": dubbed_audio.as_posix(),
         "final_video": final_video_job.as_posix(),
         "review_segments": review_path.as_posix(),
@@ -1168,9 +1085,9 @@ def main() -> int:
         pyvt_env["CUDA_VISIBLE_DEVICES"] = ""
 
     # ====================================================================
-    # SPLIT PIPELINE (when --speaker-profiling is active)
+    # SPLIT PIPELINE (always used)
     # ====================================================================
-    # STT → STS → analyze_speakers(with real timings) → direct OpenVoice bridge
+    # STT → STS → analyze_speakers(with real timings) → direct TTS bridge
     # This bypasses pyVideoTrans's TTS layer entirely for per-speaker routing.
     # ====================================================================
     srt_file: Path | None = None
@@ -1370,6 +1287,7 @@ def main() -> int:
             segments = parse_srt_to_segments(source_srt)
             if not segments:
                 return die(f"source SRT has no segments: {source_srt}")
+            speakers_dir.mkdir(parents=True, exist_ok=True)
             segments_json_path = speakers_dir / "segments.json"
             segments_json_path.write_text(
                 json.dumps(segments, ensure_ascii=False, indent=2),
@@ -1556,9 +1474,9 @@ def main() -> int:
         # manifest entries are preserved and merged back after the run.
         full_queue = queue_tts
         existing_manifest_for_merge: dict | None = None
-        if openvoice_manifest_explicit.is_file():
+        if tts_manifest_explicit.is_file():
             try:
-                existing_manifest_for_merge = read_json(openvoice_manifest_explicit)
+                existing_manifest_for_merge = read_json(tts_manifest_explicit)
             except Exception:
                 existing_manifest_for_merge = None
 
@@ -1588,7 +1506,6 @@ def main() -> int:
         # Dispatch to the correct bridge based on the selected engine.
         # Each bridge accepts the same queue_tts format and produces the
         # same manifest format, so downstream code is engine-agnostic.
-        device = "cpu" if args.cpu_only else "auto"
         started = time.time()
 
         def _run_bridge(engine: str, q_tts: list[dict]) -> subprocess.CompletedProcess:
@@ -1609,38 +1526,7 @@ def main() -> int:
                     stdout="", stderr=msg,
                 )
 
-            if engine == "openvoice":
-                openvoice_python = OPENVOICE / ".venv" / "bin" / "python"
-                if not openvoice_python.is_file():
-                    return _fail(f"OpenVoice venv python missing: {openvoice_python}")
-                if not OPENVOICE_BRIDGE_SCRIPT.is_file():
-                    return _fail(f"OpenVoice bridge script missing: {OPENVOICE_BRIDGE_SCRIPT}")
-                checkpoint_dir = OPENVOICE / "checkpoints_v2"
-                if not (checkpoint_dir / "converter" / "checkpoint.pth").is_file():
-                    return _fail(f"OpenVoice checkpoints missing: {checkpoint_dir}")
-                # Normalize language for OpenVoice
-                ov_lang = args.target_language.upper()
-                if ov_lang.startswith("ZH"):
-                    ov_lang = "ZH"
-                elif ov_lang.startswith("EN"):
-                    ov_lang = "EN"
-                return run_openvoice_bridge_direct(
-                    queue_tts=q_tts,
-                    manifest_path=openvoice_manifest_explicit,
-                    queue_path=openvoice_queue,
-                    work_dir=openvoice_work,
-                    logs_path=openvoice_logs,
-                    preserve_dir=generated_audio,
-                    openvoice_python=openvoice_python,
-                    bridge_script=OPENVOICE_BRIDGE_SCRIPT,
-                    openvoice_repo=OPENVOICE,
-                    checkpoint_dir=checkpoint_dir,
-                    language=ov_lang,
-                    device=device,
-                    allow_partial=args.allow_partial,
-                    base_speaker=args.base_speaker,
-                )
-            elif engine == "qwen3-local":
+            if engine == "qwen3-local":
                 if not QWEN3_BRIDGE_SCRIPT.is_file():
                     return _fail(f"Qwen3 bridge script missing: {QWEN3_BRIDGE_SCRIPT}")
                 # Resolve model path: use local dir if it exists, else HF repo ID
@@ -1649,10 +1535,10 @@ def main() -> int:
                     model_path = QWEN3_LOCAL_MODEL.as_posix()
                 return run_qwen3_bridge_direct(
                     queue_tts=q_tts,
-                    manifest_path=openvoice_manifest_explicit,
-                    queue_path=openvoice_queue,
-                    work_dir=openvoice_work,
-                    logs_path=openvoice_logs,
+                    manifest_path=tts_manifest_explicit,
+                    queue_path=tts_queue,
+                    work_dir=tts_work,
+                    logs_path=tts_logs,
                     preserve_dir=generated_audio,
                     bridge_script=QWEN3_BRIDGE_SCRIPT,
                     model_path=model_path,
@@ -1665,13 +1551,13 @@ def main() -> int:
                 if not OMNIVOICE_BRIDGE_SCRIPT.is_file():
                     return _fail(f"OmniVoice bridge script missing: {OMNIVOICE_BRIDGE_SCRIPT}")
                 if not args.omnivoice_url:
-                    return _fail("--omnivoice-url is required when using --tts-engine omnivoice in split mode")
+                    return _fail("--omnivoice-url is required when using --tts-engine omnivoice")
                 return run_omnivoice_bridge_direct(
                     queue_tts=q_tts,
-                    manifest_path=openvoice_manifest_explicit,
-                    queue_path=openvoice_queue,
-                    work_dir=openvoice_work,
-                    logs_path=openvoice_logs,
+                    manifest_path=tts_manifest_explicit,
+                    queue_path=tts_queue,
+                    work_dir=tts_work,
+                    logs_path=tts_logs,
                     preserve_dir=generated_audio,
                     bridge_script=OMNIVOICE_BRIDGE_SCRIPT,
                     api_url=args.omnivoice_url,
@@ -1680,7 +1566,7 @@ def main() -> int:
                     allow_partial=args.allow_partial,
                 )
             else:
-                return _fail(f"Unsupported TTS engine in split mode: {engine}")
+                return _fail(f"Unsupported TTS engine: {engine}")
 
         # --- Run the bridge (skip if everything was cached) ---
         if queue_tts:
@@ -1723,9 +1609,9 @@ def main() -> int:
         if result.returncode != 0:
             update_job_stage(job_json_path, "tts", "fail")
             return die(f"TTS bridge ({tts_engine_used}) failed: {result.stderr[-1500:]}")
-        if not openvoice_manifest_explicit.is_file():
+        if not tts_manifest_explicit.is_file():
             update_job_stage(job_json_path, "tts", "fail")
-            return die(f"TTS manifest not found: {openvoice_manifest_explicit}")
+            return die(f"TTS manifest not found: {tts_manifest_explicit}")
 
         # --- Merge regenerated results with existing manifest entries ---
         # When --skip-existing / --only-segment filtered the queue, the bridge
@@ -1733,7 +1619,7 @@ def main() -> int:
         # into the full manifest so downstream audio build sees every segment.
         if existing_manifest_for_merge and skipped_count > 0:
             try:
-                new_manifest = read_json(openvoice_manifest_explicit)
+                new_manifest = read_json(tts_manifest_explicit)
                 old_by_id = {
                     str(r.get("id", r.get("index", ""))): r
                     for r in existing_manifest_for_merge.get("results", [])
@@ -1766,7 +1652,7 @@ def main() -> int:
                 new_manifest["error"] = sum(1 for r in merged_results if r.get("status") == "error")
                 new_manifest["skipped"] = sum(1 for r in merged_results if r.get("status") == "skipped_empty_text")
                 new_manifest["skipped_empty_text"] = new_manifest["skipped"]
-                write_json(openvoice_manifest_explicit, new_manifest)
+                write_json(tts_manifest_explicit, new_manifest)
                 print(f"Merged manifest: {len(merged_results)} segments "
                       f"({skipped_count} cached + {len(new_by_id)} regenerated)")
             except Exception as exc:
@@ -1776,7 +1662,7 @@ def main() -> int:
         # without this check, downstream build_dubbed_audio would produce
         # a silent track.
         try:
-            _manifest = read_json(openvoice_manifest_explicit)
+            _manifest = read_json(tts_manifest_explicit)
         except Exception as exc:
             update_job_stage(job_json_path, "tts", "fail")
             return die(f"failed to read TTS manifest: {exc}")
@@ -1828,126 +1714,13 @@ def main() -> int:
             except Exception as exc:
                 print(f"WARNING: cache write failed: {exc}", file=sys.stderr)
 
-    # ====================================================================
-    # ORIGINAL VTV PIPELINE (when --speaker-profiling is off)
-    # ====================================================================
-    else:
-        # --- Configure OpenVoice settings in pyVideoTrans (Blocker 4) ---
-        PYVT_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-        if PYVT_CONFIG.is_file():
-            try:
-                cfg = read_json(PYVT_CONFIG)
-            except Exception:
-                cfg = {}
-        else:
-            cfg = {}
-        cfg_original: dict[str, dict] = {}
-        cfg_tracked_keys = (
-            "openvoice_default_reference",
-            PRESERVE_KEY,
-            "openvoice_queue_file",
-            "openvoice_manifest_file",
-            "openvoice_logs_file",
-            "openvoice_work_dir",
-            "openvoice_allow_partial",
-            "line_roles",
-            "speaker_type",
-            "hf_token",
-            "enable_diariz",
-        )
-        for key in cfg_tracked_keys:
-            cfg_original[key] = {
-                "existed": key in cfg,
-                "value": cfg.get(key),
-            }
-        cfg["openvoice_default_reference"] = reference.as_posix()
-        cfg[PRESERVE_KEY] = generated_audio.as_posix()
-        cfg["openvoice_queue_file"] = openvoice_queue.as_posix()
-        cfg["openvoice_manifest_file"] = openvoice_manifest_explicit.as_posix()
-        cfg["openvoice_logs_file"] = openvoice_logs.as_posix()
-        cfg["openvoice_work_dir"] = openvoice_work.as_posix()
-        cfg["openvoice_allow_partial"] = bool(args.allow_partial)
-        write_json(PYVT_CONFIG, cfg)
-        print(f"Active config: reference={reference.as_posix()} "
-              f"preserve_dir={generated_audio.as_posix()} "
-              f"cfg_path={PYVT_CONFIG.as_posix()}")
-
-        tts_provider = TTS_ENGINE_MAP[args.tts_engine]
-        fallback_provider = (
-            TTS_ENGINE_MAP[args.fallback_tts_engine]
-            if args.fallback_tts_engine != "none"
-            else None
-        )
-
-        def build_pyvt_cmd(provider: str) -> list[str]:
-            return [
-                py_python.as_posix(), "cli.py",
-                "--task", "vtv",
-                "--name", input_video.as_posix(),
-                "--recogn_type", recogn_type,
-                "--model_name", args.model,
-                "--source_language_code", args.source_language,
-                "--target_language_code", args.target_language,
-                "--tts_type", provider,
-                "--voice_role", "default",
-                "--subtitle_type", args.subtitle_type,
-                "--output-dir", output_dir.as_posix(),
-                "--no-clear-cache",
-                "--verbose",
-            ]
-
-        update_job_stage(job_json_path, "transcription", "running")
-        update_job_stage(job_json_path, "translation", "running")
-        update_job_stage(job_json_path, "tts", "running")
-        started = time.time()
-        cmd = build_pyvt_cmd(tts_provider)
-        tts_engine_used = args.tts_engine
-        fallback_attempted = False
-        try:
-            result = run_subprocess(cmd, PYVIDEOTRANS, "pyVideoTrans", env=pyvt_env)
-            if result.returncode != 0 and fallback_provider and fallback_provider != tts_provider:
-                print(
-                    f"Primary TTS engine '{args.tts_engine}' failed (exit "
-                    f"{result.returncode}). Retrying with fallback "
-                    f"'{args.fallback_tts_engine}'..."
-                )
-                fallback_attempted = True
-                fallback_cmd = build_pyvt_cmd(fallback_provider)
-                result = run_subprocess(
-                    fallback_cmd, PYVIDEOTRANS, "pyVideoTrans-fallback", env=pyvt_env,
-                )
-                tts_engine_used = args.fallback_tts_engine
-        finally:
-            if PYVT_CONFIG.is_file():
-                try:
-                    current = read_json(PYVT_CONFIG)
-                except Exception:
-                    current = {}
-                for key, state in cfg_original.items():
-                    if state["existed"]:
-                        current[key] = state["value"]
-                    else:
-                        current.pop(key, None)
-                write_json(PYVT_CONFIG, current)
-
-    # --- Locate the OpenVoice manifest (Blocker 5) ---
+    # --- Locate the TTS manifest (Blocker 5) ---
     # Use the explicit job-scoped manifest path. Fall back to extracting
     # from stdout/stderr only if the explicit path is missing.
-    # Global mtime scanning is only used behind --legacy-artifact-scan.
     manifest: Path | None = None
-    if openvoice_manifest_explicit.is_file():
-        shutil.copy2(openvoice_manifest_explicit, stable_manifest)
+    if tts_manifest_explicit.is_file():
+        shutil.copy2(tts_manifest_explicit, stable_manifest)
         manifest = stable_manifest
-    elif args.legacy_artifact_scan:
-        legacy_manifest = latest_manifest(started)
-        if legacy_manifest and legacy_manifest.is_file():
-            print(
-                "WARNING: Using legacy global tmp scan for manifest. "
-                "This is not deterministic.",
-                file=sys.stderr,
-            )
-            shutil.copy2(legacy_manifest, stable_manifest)
-            manifest = stable_manifest
     if not manifest:
         extracted = _extract_manifest_from_output(f"{result.stdout}\n{result.stderr}")
         if extracted:
@@ -1956,53 +1729,19 @@ def main() -> int:
 
     # --- Locate the SRT (Blocker 7: deterministic paths) ---
     # In the split pipeline, srt_file is already set from the STS step.
-    # In the VTV pipeline, we need to find it in the pyVideoTrans cache.
-    job_source_srt = subtitles_dir / "source.srt"
     if not srt_file:
-        # Compute the pyVideoTrans cache folder uuid (help_ffmpeg.format_video)
-        try:
-            stat = input_video.stat()
-            uuid_input = f"{input_video.as_posix()}-{stat.st_size}-{stat.st_mtime}"
-            pyvt_uuid = hashlib.md5(uuid_input.encode()).hexdigest()[:10]
-            pyvt_cache = PYVIDEOTRANS / "tmp" / pyvt_uuid
-        except Exception:
-            pyvt_cache = None
-
-        if pyvt_cache and pyvt_cache.is_dir():
-            # Look for source + translated SRTs in the deterministic cache path
+        # If somehow the split pipeline did not produce an SRT, scan the
+        # pyVideoTrans tmp folder for the most recently created matching SRT.
+        new_srts = [
+            p for p in (PYVIDEOTRANS / "tmp").rglob("*.srt")
+            if p.stat().st_mtime >= started
+        ]
+        if new_srts:
             lang_lower = args.target_language.lower().replace("-", "")
-            src_lower = args.source_language.lower().replace("-", "")
-            cache_srts = list(pyvt_cache.glob("*.srt"))
-            if cache_srts:
-                lang_matches = [p for p in cache_srts if lang_lower in p.name.lower()]
-                if not lang_matches:
-                    lang_matches = [p for p in cache_srts if src_lower not in p.name.lower()]
-                chosen = (
-                    lang_matches[0] if lang_matches
-                    else max(cache_srts, key=lambda p: p.stat().st_mtime)
-                )
-                shutil.copy2(chosen, job_srt)
-                srt_file = job_srt
-                src_matches = [p for p in cache_srts if src_lower in p.name.lower()]
-                if src_matches:
-                    shutil.copy2(src_matches[0], job_source_srt)
-
-        if not srt_file and args.legacy_artifact_scan:
-            legacy_srt = latest_srt(started)
-            if legacy_srt and legacy_srt.is_file():
-                shutil.copy2(legacy_srt, job_srt)
-                srt_file = job_srt
-        elif not srt_file:
-            new_srts = [
-                p for p in (PYVIDEOTRANS / "tmp").rglob("*.srt")
-                if p.stat().st_mtime >= started
-            ]
-            if new_srts:
-                lang_lower = args.target_language.lower().replace("-", "")
-                lang_matches = [p for p in new_srts if lang_lower in p.name.lower()]
-                chosen = lang_matches[0] if lang_matches else max(new_srts, key=lambda p: p.stat().st_mtime)
-                shutil.copy2(chosen, job_srt)
-                srt_file = job_srt
+            lang_matches = [p for p in new_srts if lang_lower in p.name.lower()]
+            chosen = lang_matches[0] if lang_matches else max(new_srts, key=lambda p: p.stat().st_mtime)
+            shutil.copy2(chosen, job_srt)
+            srt_file = job_srt
 
     # --- Enrich manifest with speaker_id (Blocker 5) ---
     # If speaker profiling is active, inject speaker_id + reference info into
@@ -2065,13 +1804,13 @@ def main() -> int:
     try:
         if result.returncode != 0:
             update_job_stage(job_json_path, "tts", "fail")
-            raise RuntimeError(f"pyVideoTrans exited with code {result.returncode}")
+            raise RuntimeError(f"TTS bridge exited with code {result.returncode}")
         if not manifest or not manifest.is_file():
             update_job_stage(job_json_path, "tts", "fail")
-            raise RuntimeError("OpenVoice manifest was not found")
+            raise RuntimeError("TTS manifest was not found")
         if report["segments_ok"] < 1:
             update_job_stage(job_json_path, "tts", "fail")
-            raise RuntimeError("OpenVoice manifest has no successful segment")
+            raise RuntimeError("TTS manifest has no successful segment")
         update_job_stage(job_json_path, "transcription", "pass")
         update_job_stage(job_json_path, "translation", "pass")
         update_job_stage(job_json_path, "tts", "pass")
@@ -2202,7 +1941,7 @@ def main() -> int:
         # remux_command points to the job dir final video so regeneration
         # rebuilds that, then syncs to the user output path via report.json.
         # Use explicit job-scoped queue file (Blocker 5). No global mtime scan.
-        queue_file = openvoice_queue if openvoice_queue.is_file() else None
+        queue_file = tts_queue if tts_queue.is_file() else None
         # If we have an enriched manifest, pass it to write_review_file so
         # speaker_id and target fields propagate into review_segments.json.
         review_manifest = (

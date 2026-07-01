@@ -49,7 +49,7 @@ def parse_srt(path: Path | None) -> list[dict]:
 
 
 def extract_manifest_from_output(text: str) -> dict | None:
-    """Scan stdout/stderr text for an OpenVoice manifest JSON object."""
+    """Scan stdout/stderr text for a TTS manifest JSON object."""
     decoder = json.JSONDecoder()
     for index, char in enumerate(text):
         if char != "{":

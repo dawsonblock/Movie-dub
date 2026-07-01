@@ -8,7 +8,7 @@ pyVideoTrans tests, etc.) and writes a structured JSON report to
 
 Usage:
     python scripts/write_proof_report.py --result pass
-    python scripts/write_proof_report.py --result fail --failed-check openvoice_checkpoints
+    python scripts/write_proof_report.py --result fail --failed-check qwen3_model
     python scripts/write_proof_report.py --result fail --failed-check doctor --message "..."
     python scripts/write_proof_report.py --checks-json /tmp/checks.json
 """

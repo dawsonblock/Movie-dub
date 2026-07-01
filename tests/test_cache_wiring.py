@@ -200,13 +200,13 @@ class TestVoiceLockRouting:
 # ---------------------------------------------------------------------------
 
 class TestTtsModelId:
-    def test_openvoice(self):
-        args = type("A", (), {"qwen3_model": "some/model"})()
-        assert _tts_model_id("openvoice", args) == "openvoice-v2"
-
     def test_qwen3_local(self):
         args = type("A", (), {"qwen3_model": "Qwen/Qwen3-TTS-1.7B"})()
         assert _tts_model_id("qwen3-local", args) == "Qwen/Qwen3-TTS-1.7B"
+
+    def test_omnivoice(self):
+        args = type("A", (), {"omnivoice_url": "http://localhost:3900"})()
+        assert _tts_model_id("omnivoice", args) == "omnivoice-http://localhost:3900"
 
 
 # ---------------------------------------------------------------------------
@@ -227,8 +227,8 @@ class TestComputeSegmentCacheKeys:
             source_audio_hash="aaa",
             subtitle_hash="bbb",
             speaker_profile_hash="ccc",
-            tts_engine="openvoice",
-            tts_model="openvoice-v2",
+            tts_engine="qwen3-local",
+            tts_model="Qwen3-TTS-0.6B",
             language="en",
         )
 
@@ -319,8 +319,8 @@ class TestCacheHitMissFlow:
         queue = [{"line": 1, "text": "Hello", "ref_wav": "/a.wav"}]
         kwargs = dict(
             source_audio_hash="aaa", subtitle_hash="bbb",
-            speaker_profile_hash="ccc", tts_engine="openvoice",
-            tts_model="openvoice-v2", language="en",
+            speaker_profile_hash="ccc", tts_engine="qwen3-local",
+            tts_model="Qwen3-TTS-0.6B", language="en",
         )
         keys_original = _compute_segment_cache_keys(queue, **kwargs)
         queue_changed = [{"line": 1, "text": "Hello CHANGED", "ref_wav": "/a.wav"}]

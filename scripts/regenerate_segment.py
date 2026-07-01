@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Regenerate one OpenVoice segment from a review job directory."""
+"""Regenerate one TTS segment from a review job directory.
+
+Supports the split-pipeline engines: qwen3-local and omnivoice.
+"""
 
 from __future__ import annotations
 
@@ -15,23 +18,19 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OPENVOICE = ROOT / "OpenVoice-main"
 PYVIDEOTRANS = ROOT / "pyvideotrans-main"
 
-# Bridge scripts per engine. The split pipeline supports openvoice, qwen3-local
+# Bridge scripts per engine. The split pipeline supports qwen3-local
 # and omnivoice.
 BRIDGE_SCRIPTS = {
-    "openvoice": ROOT / "bridge" / "openvoice_segment_tts.py",
     "qwen3-local": ROOT / "bridge" / "qwen3_segment_tts.py",
     "omnivoice": ROOT / "bridge" / "omnivoice_segment_tts.py",
 }
 BRIDGE_VENVS = {
-    "openvoice": OPENVOICE / ".venv" / "bin" / "python",
     "qwen3-local": PYVIDEOTRANS / ".venv" / "bin" / "python",
     "omnivoice": Path(sys.executable),
 }
 BRIDGE_CWDS = {
-    "openvoice": OPENVOICE,
     "qwen3-local": ROOT,
     "omnivoice": ROOT,
 }
@@ -53,6 +52,16 @@ def find_segment(review: list[dict], segment_id: str) -> dict:
     raise RuntimeError(f"segment id not found in review file: {segment_id}")
 
 
+def _default_reference() -> Path:
+    ref = ROOT / "voices" / "reference.wav"
+    if ref.is_file():
+        return ref
+    male_ref = ROOT / "voices" / "male_reference.wav"
+    if male_ref.is_file():
+        return male_ref
+    return ref
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Regenerate one segment from review_segments.json")
     parser.add_argument("--job", help="job directory containing review_segments.json (alias for --job-dir)")
@@ -62,8 +71,8 @@ def main() -> int:
     parser.add_argument("--remux", action="store_true", help="rebuild dubbed audio and remux final video after regeneration")
     # --- Review-loop enhancements (v0.12) ---
     parser.add_argument("--tts-engine", choices=list(BRIDGE_SCRIPTS.keys()),
-                        default="openvoice",
-                        help="TTS bridge to use for regeneration (default: openvoice). "
+                        default="qwen3-local",
+                        help="TTS bridge to use for regeneration (default: qwen3-local). "
                              "Must match the engine used for the original dub.")
     parser.add_argument("--change-speaker", default="",
                         help="re-assign this segment to a different speaker_id "
@@ -85,7 +94,7 @@ def main() -> int:
         parser.error("one of --job or --job-dir is required")
     job = Path(args.job).expanduser().resolve()
     review_file = job / "review_segments.json"
-    manifest_file = job / "openvoice_manifest.json"
+    manifest_file = job / "tts_manifest.json"
     if not review_file.is_file():
         print(f"Missing review file: {review_file}", file=sys.stderr)
         return 1
@@ -164,7 +173,7 @@ def main() -> int:
             "start": segment.get("start", 0.0),
             "end": segment.get("end", 0.0),
             "role": segment.get("role", "clone"),
-            "ref_wav": segment.get("ref_wav") or (ROOT / "voices" / "openvoice_default_reference.wav").as_posix(),
+            "ref_wav": segment.get("ref_wav") or _default_reference().as_posix(),
         }
         write_json(queue_file, [segment_queue])
 
@@ -189,29 +198,22 @@ def main() -> int:
             (job / "regenerate_work").as_posix(),
             "--language",
             segment.get("language", "EN"),
-            "--device",
-            segment.get("device", "auto"),
+            "--logs-file",
+            (job / "regenerate_work" / "bridge.log").as_posix(),
             "--preserve-dir",
             (job / "generated_audio").as_posix(),
         ]
-        if engine == "openvoice":
-            cmd.extend([
-                "--openvoice-repo", OPENVOICE.as_posix(),
-                "--checkpoint-dir", (OPENVOICE / "checkpoints_v2").as_posix(),
-                "--default-reference",
-                (ROOT / "voices" / "openvoice_default_reference.wav").as_posix(),
-            ])
-        elif engine == "qwen3-local":
+        if engine == "qwen3-local":
             model = args.qwen3_model or ""
             if model:
-                cmd.extend(["--model", model])
+                cmd.extend(["--model-path", model])
         else:  # omnivoice
             if not args.omnivoice_url:
                 raise RuntimeError("--omnivoice-url is required with --tts-engine omnivoice")
             cmd.extend([
                 "--api-url", args.omnivoice_url,
                 "--default-reference",
-                (ROOT / "voices" / "openvoice_default_reference.wav").as_posix(),
+                _default_reference().as_posix(),
             ])
         result = subprocess.run(cmd, cwd=bridge_cwd, text=True, capture_output=True)
         if result.returncode != 0:

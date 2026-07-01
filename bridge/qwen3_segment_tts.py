@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Generate per-speaker TTS segment WAV files with Qwen3-TTS (MLX).
 
-This script is the Qwen3-TTS equivalent of openvoice_segment_tts.py.
-It accepts the same --queue-tts-file / --manifest-file interface so the
-split pipeline in run_personal_dub.py can use it as a drop-in replacement.
+This script is the Qwen3-TTS bridge for the split pipeline. It accepts
+the same --queue-tts-file / --manifest-file interface as the other split
+TTS bridges so run_personal_dub.py can use it as a drop-in engine.
 
 Each queue item should have:
   - text: the text to synthesize
   - ref_wav / voice_reference: path to the speaker's reference audio
   - start_time / end_time: segment timing in milliseconds
-  - openvoice_output / output_audio / filename: output WAV path
+  - output_audio / filename: output WAV path
 
 The script uses mlx-audio for on-device Apple Silicon inference.
 Voice cloning is done via ref_audio + ref_text (the reference transcript
@@ -35,7 +35,7 @@ from typing import Any
 
 
 # ---------------------------------------------------------------------------
-# Shared utilities (mirrored from openvoice_segment_tts.py for independence)
+# Shared utilities (independent of other bridge implementations)
 # ---------------------------------------------------------------------------
 
 SUPPORTED_LANGUAGES = {
@@ -240,8 +240,7 @@ def synthesize_segments(args: argparse.Namespace) -> int:
             item.get("text") or item.get("target_text") or ""
         ).strip()
         output_audio = (
-            item.get("openvoice_output")
-            or item.get("output_audio")
+            item.get("output_audio")
             or item.get("filename")
         )
         start_s, end_s = segment_times_seconds(item)
@@ -403,8 +402,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Generate per-speaker TTS WAV segments with Qwen3-TTS (MLX). "
-            "Drop-in replacement for openvoice_segment_tts.py in the "
-            "speaker-profiling split pipeline."
+            "Split-pipeline TTS bridge for the speaker-profiling flow."
         )
     )
     parser.add_argument(

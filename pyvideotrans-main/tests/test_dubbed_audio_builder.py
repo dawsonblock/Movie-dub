@@ -44,7 +44,7 @@ def test_build_dubbed_audio_places_segments_on_canvas(tmp_path):
             {"id": 2, "status": "ok", "start": 2.0, "end": 2.8, "output_audio": (gen / "000002.wav").as_posix()},
         ],
     }
-    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path = tmp_path / "tts_manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     output_audio = tmp_path / "dubbed_audio.wav"
 
@@ -76,7 +76,7 @@ def test_build_dubbed_audio_rejects_failed_segment_without_allow_partial(tmp_pat
             {"id": 2, "status": "error", "start": 1.5, "end": 2.5, "output_audio": (gen / "000002.wav").as_posix()},
         ],
     }
-    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path = tmp_path / "tts_manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     output_audio = tmp_path / "dubbed_audio.wav"
 
@@ -99,7 +99,7 @@ def test_build_dubbed_audio_allow_partial_skips_failed(tmp_path):
             {"id": 2, "status": "error", "start": 1.5, "end": 2.5, "output_audio": (gen / "000002.wav").as_posix()},
         ],
     }
-    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path = tmp_path / "tts_manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     output_audio = tmp_path / "dubbed_audio.wav"
 
@@ -122,7 +122,7 @@ def test_build_dubbed_audio_supports_legacy_results_key(tmp_path):
             {"id": 1, "status": "ok", "start": 0.0, "end": 1.0, "output_audio": (gen / "000001.wav").as_posix()},
         ],
     }
-    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path = tmp_path / "tts_manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     output_audio = tmp_path / "dubbed_audio.wav"
 
@@ -145,7 +145,7 @@ def test_skipped_empty_text_fails_without_allow_partial(tmp_path):
             {"id": 2, "status": "skipped_empty_text", "start": 1.5, "end": 2.5, "output_audio": ""},
         ],
     }
-    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path = tmp_path / "tts_manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     output_audio = tmp_path / "dubbed_audio.wav"
 
@@ -166,7 +166,7 @@ def test_skipped_empty_text_passes_with_allow_partial(tmp_path):
             {"id": 2, "status": "skipped_empty_text", "start": 1.5, "end": 2.5, "output_audio": ""},
         ],
     }
-    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path = tmp_path / "tts_manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     output_audio = tmp_path / "dubbed_audio.wav"
 
@@ -190,7 +190,7 @@ def test_skipped_status_fails_without_allow_partial(tmp_path):
             {"id": 2, "status": "skipped", "start": 1.5, "end": 2.5, "output_audio": ""},
         ],
     }
-    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path = tmp_path / "tts_manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     output_audio = tmp_path / "dubbed_audio.wav"
 
@@ -224,7 +224,7 @@ def test_voice_volume_increases_peak(tmp_path):
              "output_audio": (gen / "000001.wav").as_posix()},
         ],
     }
-    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path = tmp_path / "tts_manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     normal_out = tmp_path / "normal.wav"
@@ -266,7 +266,7 @@ def test_no_normalize_keeps_lower_peak(tmp_path):
              "output_audio": (gen / "000001.wav").as_posix()},
         ],
     }
-    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path = tmp_path / "tts_manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     norm_out = tmp_path / "normalized.wav"
@@ -298,7 +298,7 @@ def test_final_gain_affects_output_level(tmp_path):
              "output_audio": (gen / "000001.wav").as_posix()},
         ],
     }
-    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path = tmp_path / "tts_manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     # Use no_normalize so final_gain is the only gain control
@@ -330,7 +330,7 @@ def test_report_includes_audio_quality_fields(tmp_path):
              "output_audio": (gen / "000001.wav").as_posix()},
         ],
     }
-    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path = tmp_path / "tts_manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     output_audio = tmp_path / "dubbed_audio.wav"
 
@@ -355,7 +355,7 @@ def test_report_includes_advanced_audio_fields(tmp_path):
              "output_audio": (gen / "000001.wav").as_posix()},
         ],
     }
-    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path = tmp_path / "tts_manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     output_audio = tmp_path / "dubbed_audio.wav"
 
@@ -383,7 +383,7 @@ def test_vocal_separation_with_background(tmp_path):
              "output_audio": (gen / "000001.wav").as_posix()},
         ],
     }
-    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path = tmp_path / "tts_manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     output_audio = tmp_path / "dubbed_audio.wav"
 
@@ -416,7 +416,7 @@ def test_ducking_with_background(tmp_path):
     }
     # Write second segment WAV
     _write_tone_wav(gen / "000002.wav", 1.0)
-    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path = tmp_path / "tts_manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     output_audio = tmp_path / "dubbed_audio.wav"
 
@@ -442,7 +442,7 @@ def test_lufs_normalization(tmp_path):
              "output_audio": (gen / "000001.wav").as_posix()},
         ],
     }
-    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path = tmp_path / "tts_manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     output_audio = tmp_path / "dubbed_audio.wav"
 
@@ -471,7 +471,7 @@ def test_vocal_separation_ducking_lufs_combined(tmp_path):
              "output_audio": (gen / "000002.wav").as_posix()},
         ],
     }
-    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path = tmp_path / "tts_manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     output_audio = tmp_path / "dubbed_audio.wav"
 
@@ -500,7 +500,7 @@ def test_report_includes_warnings_list(tmp_path):
              "output_audio": (gen / "000001.wav").as_posix()},
         ],
     }
-    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path = tmp_path / "tts_manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     output_audio = tmp_path / "dubbed_audio.wav"
 
@@ -526,7 +526,7 @@ def test_build_report_includes_vocal_separation_method(tmp_path):
              "output_audio": (gen / "000001.wav").as_posix()},
         ],
     }
-    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path = tmp_path / "tts_manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     output_audio = tmp_path / "dubbed_audio.wav"
 
@@ -551,7 +551,7 @@ def test_build_accepts_demucs_timeout_param(tmp_path):
              "output_audio": (gen / "000001.wav").as_posix()},
         ],
     }
-    manifest_path = tmp_path / "openvoice_manifest.json"
+    manifest_path = tmp_path / "tts_manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     output_audio = tmp_path / "dubbed_audio.wav"
 

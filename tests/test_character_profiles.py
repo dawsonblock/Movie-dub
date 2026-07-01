@@ -247,7 +247,7 @@ class TestIdempotency:
 class TestWriteLoad:
     def test_round_trip(self, tmp_path):
         sp = _speaker_profiles_two()
-        cp = build_character_profiles(sp, tts_engine="openvoice")
+        cp = build_character_profiles(sp, tts_engine="qwen3-local")
         path = tmp_path / "cp.json"
         write_character_profiles(path, cp, source="/sp.json")
         assert path.is_file()

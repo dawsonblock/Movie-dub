@@ -20,12 +20,12 @@ def test_config_restore_removes_missing_keys(tmp_path):
     cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
     # Track original state of keys we will modify
     cfg_original = {}
-    for key in ("openvoice_default_reference", "openvoice_preserve_dir"):
+    for key in ("tts_default_reference", "tts_preserve_dir"):
         cfg_original[key] = {"existed": key in cfg, "value": cfg.get(key)}
 
     # Set the keys (simulating the run)
-    cfg["openvoice_default_reference"] = "/ref.wav"
-    cfg["openvoice_preserve_dir"] = "/preserve"
+    cfg["tts_default_reference"] = "/ref.wav"
+    cfg["tts_preserve_dir"] = "/preserve"
     cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
 
     # Simulate pyVideoTrans adding its own keys during the run
@@ -44,8 +44,8 @@ def test_config_restore_removes_missing_keys(tmp_path):
 
     final = json.loads(cfg_path.read_text(encoding="utf-8"))
     # Keys that didn't exist should be removed, not empty strings
-    assert "openvoice_default_reference" not in final
-    assert "openvoice_preserve_dir" not in final
+    assert "tts_default_reference" not in final
+    assert "tts_preserve_dir" not in final
     # Keys that did exist should be restored
     assert final.get("some_key") == "value"
     # pyVideoTrans keys should be preserved
@@ -56,20 +56,20 @@ def test_config_restore_preserves_existing_keys(tmp_path):
     """Config restore should preserve existing key values (Blocker 4)."""
     cfg_path = tmp_path / "cfg.json"
     original = {
-        "openvoice_default_reference": "/original_ref.wav",
-        "openvoice_preserve_dir": "/original_preserve",
+        "tts_default_reference": "/original_ref.wav",
+        "tts_preserve_dir": "/original_preserve",
         "other_key": "keep_me",
     }
     cfg_path.write_text(json.dumps(original), encoding="utf-8")
 
     cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
     cfg_original = {}
-    for key in ("openvoice_default_reference", "openvoice_preserve_dir"):
+    for key in ("tts_default_reference", "tts_preserve_dir"):
         cfg_original[key] = {"existed": key in cfg, "value": cfg.get(key)}
 
     # Modify during run
-    cfg["openvoice_default_reference"] = "/new_ref.wav"
-    cfg["openvoice_preserve_dir"] = "/new_preserve"
+    cfg["tts_default_reference"] = "/new_ref.wav"
+    cfg["tts_preserve_dir"] = "/new_preserve"
     cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
 
     # Restore
@@ -82,8 +82,8 @@ def test_config_restore_preserves_existing_keys(tmp_path):
     cfg_path.write_text(json.dumps(current), encoding="utf-8")
 
     final = json.loads(cfg_path.read_text(encoding="utf-8"))
-    assert final["openvoice_default_reference"] == "/original_ref.wav"
-    assert final["openvoice_preserve_dir"] == "/original_preserve"
+    assert final["tts_default_reference"] == "/original_ref.wav"
+    assert final["tts_preserve_dir"] == "/original_preserve"
     assert final["other_key"] == "keep_me"
 
 
@@ -97,9 +97,9 @@ def test_config_creation_when_missing(tmp_path):
     else:
         cfg = {}
 
-    cfg["openvoice_default_reference"] = "/ref.wav"
+    cfg["tts_default_reference"] = "/ref.wav"
     cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
 
     assert cfg_path.is_file()
     data = json.loads(cfg_path.read_text(encoding="utf-8"))
-    assert data["openvoice_default_reference"] == "/ref.wav"
+    assert data["tts_default_reference"] == "/ref.wav"

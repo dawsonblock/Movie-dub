@@ -93,8 +93,8 @@ class TestSegmentCacheKey:
         subtitle_hash="bbb",
         speaker_profile_hash="ccc",
         translated_text="hello",
-        tts_engine="openvoice",
-        tts_model="v2",
+        tts_engine="qwen3-local",
+        tts_model="Qwen3-TTS-0.6B",
         reference_audio_hash="ddd",
     )
 
@@ -113,7 +113,7 @@ class TestSegmentCacheKey:
 
     def test_engine_change(self):
         base = dict(self.BASE)
-        base["tts_engine"] = "qwen3-local"
+        base["tts_engine"] = "omnivoice"
         assert segment_cache_key(**base) != segment_cache_key(**self.BASE)
 
     def test_model_change(self):

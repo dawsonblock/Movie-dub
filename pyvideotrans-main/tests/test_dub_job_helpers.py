@@ -33,7 +33,7 @@ def _write_tone_wav(path: Path, duration: float, sr: int = 44100) -> None:
 
 
 def _make_manifest(gen_dir: Path) -> dict:
-    """Build a realistic OpenVoice manifest with preserved_audio paths."""
+    """Build a realistic TTS manifest with preserved_audio paths."""
     gen_dir.mkdir(parents=True, exist_ok=True)
     _write_tone_wav(gen_dir / "000001-1.wav", 1.5)
     _write_tone_wav(gen_dir / "000002-2.wav", 1.0)
@@ -72,7 +72,7 @@ def test_write_review_file_produces_all_required_fields(tmp_path):
     job_dir = tmp_path / "personal_dub" / "123"
     gen_dir = job_dir / "generated_audio"
     manifest_data = _make_manifest(gen_dir)
-    manifest_path = job_dir / "openvoice_manifest.json"
+    manifest_path = job_dir / "tts_manifest.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
     review_path = job_dir / "review_segments.json"
@@ -107,7 +107,7 @@ def test_write_remux_command_produces_dict_format(tmp_path):
     input_video = TEST_VIDEO
     dubbed_audio = job_dir / "dubbed_audio.wav"
     output_video = job_dir / "final_dubbed.mp4"
-    manifest_path = job_dir / "openvoice_manifest.json"
+    manifest_path = job_dir / "tts_manifest.json"
 
     dub_job_helpers.write_remux_command(
         remux_path, input_video, dubbed_audio, output_video, manifest_path
@@ -131,7 +131,7 @@ def test_personal_dub_job_has_all_regeneration_artifacts(tmp_path):
     job_dir = tmp_path / "personal_dub" / "123"
     gen_dir = job_dir / "generated_audio"
     manifest_data = _make_manifest(gen_dir)
-    manifest_path = job_dir / "openvoice_manifest.json"
+    manifest_path = job_dir / "tts_manifest.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
     review_path = job_dir / "review_segments.json"
@@ -149,7 +149,7 @@ def test_personal_dub_job_has_all_regeneration_artifacts(tmp_path):
     )
 
     # All regeneration artifacts must exist
-    assert manifest_path.is_file(), "openvoice_manifest.json missing"
+    assert manifest_path.is_file(), "tts_manifest.json missing"
     assert review_path.is_file(), "review_segments.json missing"
     assert remux_path.is_file(), "remux_command.json missing"
     assert gen_dir.is_dir(), "generated_audio/ dir missing"
@@ -185,7 +185,7 @@ def test_write_review_file_handles_none_srt(tmp_path):
     job_dir = tmp_path / "personal_dub" / "456"
     gen_dir = job_dir / "generated_audio"
     manifest_data = _make_manifest(gen_dir)
-    manifest_path = job_dir / "openvoice_manifest.json"
+    manifest_path = job_dir / "tts_manifest.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
     review_path = job_dir / "review_segments.json"
@@ -221,7 +221,7 @@ def test_write_review_file_preserves_manifest_text_without_srt(tmp_path):
              "timing_status": "accept"},
         ],
     }
-    manifest_path = job_dir / "openvoice_manifest.json"
+    manifest_path = job_dir / "tts_manifest.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
     review_path = job_dir / "review_segments.json"
@@ -242,7 +242,7 @@ def test_write_remux_command_preserves_audio_options(tmp_path):
     input_video = TEST_VIDEO
     dubbed_audio = job_dir / "dubbed_audio.wav"
     output_video = job_dir / "final_dubbed.mp4"
-    manifest_path = job_dir / "openvoice_manifest.json"
+    manifest_path = job_dir / "tts_manifest.json"
 
     audio_options = {
         "background_volume": 0.15,
@@ -302,7 +302,7 @@ def test_write_remux_command_without_audio_options(tmp_path):
     input_video = TEST_VIDEO
     dubbed_audio = job_dir / "dubbed_audio.wav"
     output_video = job_dir / "final_dubbed.mp4"
-    manifest_path = job_dir / "openvoice_manifest.json"
+    manifest_path = job_dir / "tts_manifest.json"
 
     dub_job_helpers.write_remux_command(
         remux_path, input_video, dubbed_audio, output_video, manifest_path
@@ -325,7 +325,7 @@ def test_write_remux_command_includes_report_json(tmp_path):
     input_video = TEST_VIDEO
     dubbed_audio = job_dir / "dubbed_audio.wav"
     output_video = job_dir / "final_dubbed.mp4"
-    manifest_path = job_dir / "openvoice_manifest.json"
+    manifest_path = job_dir / "tts_manifest.json"
 
     dub_job_helpers.write_remux_command(
         remux_path, input_video, dubbed_audio, output_video, manifest_path

@@ -7,7 +7,6 @@ repository (scripts/, bridge/, Makefile). Bundled third-party projects
 retain their own licenses. See LICENSES.md and UPSTREAMS.md for details.
 
 pyVideoTrans (pyvideotrans-main/) is licensed under GPLv3.
-OpenVoice (OpenVoice-main/) is licensed under Apache 2.0.
 
 Redistribution of the full bundle is subject to all included upstream
 licenses. Because pyVideoTrans is GPLv3, the combined work must be

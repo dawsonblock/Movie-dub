@@ -4,10 +4,10 @@ Build/test commands and conventions learned while working in this repo.
 
 ## Verification commands
 
-- **Unit tests:** `make test` or `python3 -m pytest tests/ -q` (238 tests, lightweight, no model deps)
+- **Unit tests:** `make test` or `python3 -m pytest tests/ -q` (266 tests, lightweight, no model deps)
 - **Lint:** `ruff check scripts/` (must be clean; repo history shows lint fixes are expected)
 - **Doctor:** `python3 scripts/doctor.py` → must print `READY: yes` with 0 required failures
-- **E2E smoke:** `python3 scripts/smoke_e2e_short_clip.py` (needs OpenVoice checkpoints; ~minutes)
+- **E2E smoke:** `python3 scripts/smoke_e2e_short_clip.py --tts-engine qwen3-local` (needs Qwen3 model; ~minutes)
 - **Age model status:** `python3 scripts/age_model.py` (exit 1 = unavailable, falls back to heuristic)
 - **Syntax check a script:** `python3 -c "import ast; ast.parse(open('scripts/x.py').read())"`
 
@@ -15,7 +15,7 @@ Build/test commands and conventions learned while working in this repo.
 
 - **Whisper MPS out-of-memory:** On Apple Silicon, `whisper-large-v3-turbo` can
   exhaust the MPS memory pool. Use `CPU_ONLY=1` on `make dub` / `make
-  benchmark` to force Whisper to CPU (OpenVoice still uses MPS).
+  benchmark` to force Whisper to CPU (Qwen3 still uses MLX on Apple Silicon).
 - **HF_TOKEN:** Speaker profiling (`SPEAKER_PROFILING=1`) requires the
   `pyannote/speaker-diarization-3.1` model, which is gated. Set a valid token
   and accept the model terms at https://hf.co/pyannote/speaker-diarization-3.1
@@ -42,20 +42,25 @@ Tests live in `tests/` and use pytest. `conftest.py` adds `scripts/` to
   validation, output writing
 - `test_pipeline_flags.py` — argparse wiring (subprocess --help) for all
   pipeline scripts
+- `test_qwen3_bridge.py` — Qwen3 bridge compiles, --help, manifest schema
+- `test_qwen3_doctor.py` — doctor no longer requires OpenVoice
+- `test_no_openvoice_required.py` — openvoice rejected, files removed
+- `test_tts_artifact_names.py` — tts_* naming in run_personal_dub.py
 
 ## Architecture
 
-- Two isolated venvs: `pyvideotrans-main/.venv` (pyannote/librosa/whisper) and
-  `OpenVoice-main/.venv` (OpenVoice/MeloTTS). Never merge them.
-- `scripts/run_personal_dub.py` is the main CLI (~1900 lines). Two pipelines:
-  - **VTV pipeline** (default): pyVideoTrans `cli.py --task vtv`
-  - **Split pipeline** (`--speaker-profiling`): STT → STS → analyze_speakers → direct bridge → build audio → remux
-- Bridges live in `bridge/` (`openvoice_segment_tts.py`, `qwen3_segment_tts.py`).
+- Isolated venvs: `pyvideotrans-main/.venv` (pyannote/librosa/whisper) and the
+  wrapper interpreter for Qwen3 (MLX). Never merge them.
+- `scripts/run_personal_dub.py` is the main CLI. It always runs the **split
+  pipeline**: STT → STS → analyze_speakers → direct bridge → build audio → remux.
+- Bridges live in `bridge/` (`qwen3_segment_tts.py`, `omnivoice_segment_tts.py`).
   Both accept the same `queue_tts` JSON and emit the same manifest format.
 - Job state: `scripts/job_state.py` is the single source of truth for job dirs
   (`pyvideotrans-main/tmp/personal_dub/<job_id>/`) and `job.json` stage status.
 - Stage names (canonical order): `subtitle_extraction, transcription, translation,
   speaker_profiling, tts, audio_build, remux, verification`.
+- TTS engine provider map (pyVideoTrans `videotrans/tts/__init__.py`):
+  `qwen3-local` -> `1`, `omnivoice` -> `2`. OpenVoice provider `34` is no longer used.
 
 ## v0.12 modules
 

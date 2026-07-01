@@ -34,7 +34,7 @@ def test_job_paths_mkdirs(tmp_path):
     paths = job_state.JobPaths(tmp_path / "test_job")
     paths.mkdirs()
     assert paths.input_dir.is_dir()
-    assert paths.openvoice_dir.is_dir()
+    assert paths.tts_dir.is_dir()
     assert paths.segments_dir.is_dir()
     assert paths.audio_dir.is_dir()
     assert paths.video_dir.is_dir()

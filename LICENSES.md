@@ -23,31 +23,13 @@ licensed under the GNU General Public License v3, which means any
 redistribution of the full bundle (wrapper + pyVideoTrans) must comply with
 GPLv3 terms.
 
-## OpenVoice
-
-- **Location:** `OpenVoice-main/`
-- **License:** Apache License 2.0 (MyShell OpenVoice)
-- **Upstream:** https://github.com/myshell-ai/OpenVoice
-
-OpenVoice is a voice cloning and tone conversion library. It is licensed
-under the Apache License 2.0.
-
-## OpenVoice V2 Checkpoints
-
-- **Location:** `OpenVoice-main/checkpoints_v2/`
-- **License:** Refer to the upstream model card and Hugging Face repo.
-- **Upstream:** https://huggingface.co/rsxdalv/OpenVoiceV2
-
-Checkpoints are not committed to this repository and are only downloaded
-when you explicitly run `make download-openvoice`.
-
 ## Redistribution notice
 
-Redistribution of the full bundle (wrapper scripts + pyVideoTrans +
-OpenVoice) is subject to **all** included upstream licenses. Because
-pyVideoTrans is GPLv3, the combined work must be distributed under GPLv3
-terms. The MIT-licensed wrapper scripts can still be used independently
-under MIT terms, but when distributed together with pyVideoTrans, the
-GPLv3 license takes precedence for the combined work.
+Redistribution of the full bundle (wrapper scripts + pyVideoTrans) is
+subject to **all** included upstream licenses. Because pyVideoTrans is
+GPLv3, the combined work must be distributed under GPLv3 terms. The
+MIT-licensed wrapper scripts can still be used independently under MIT
+terms, but when distributed together with pyVideoTrans, the GPLv3 license
+takes precedence for the combined work.
 
 **In short:** do not assume the whole project is MIT. It is not.

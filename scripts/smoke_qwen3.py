@@ -7,8 +7,8 @@ This proves the Qwen3-local engine end-to-end on this Mac:
   - a real 24 kHz WAV is written
   - the WAV is non-empty and has a sane duration
 
-It does NOT touch OpenVoice, pyVideoTrans, diarization, or the full
-dub pipeline. It only proves the TTS bridge can produce audio.
+It does NOT touch pyVideoTrans, diarization, or the full dub pipeline.
+It only proves the TTS bridge can produce audio.
 
 Run with the wrapper python (the one that runs run_personal_dub.py):
   python3 scripts/smoke_qwen3.py
@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / "bridge" / "qwen3_segment_tts.py"
 DEFAULT_MODEL_DIR = ROOT / "models" / "Qwen3-TTS-12Hz-0.6B-Base-bf16"
 DEFAULT_MODEL_REPO = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16"
-DEFAULT_REFERENCE = ROOT / "voices" / "openvoice_default_reference.wav"
+DEFAULT_REFERENCE = ROOT / "voices" / "reference.wav"
 SAMPLE_TEXT = "I told you not to open that door."
 
 
@@ -72,8 +72,12 @@ def main() -> int:
         return 1
     ref = Path(args.reference).expanduser().resolve()
     if not ref.is_file():
-        print(f"FAIL: reference WAV missing: {ref}")
-        return 1
+        male_ref = ROOT / "voices" / "male_reference.wav"
+        if male_ref.is_file():
+            ref = male_ref
+        else:
+            print(f"FAIL: reference WAV missing: {ref}")
+            return 1
 
     model_path = _resolve_model(args.model_path)
     work_dir = Path(args.work_dir).expanduser().resolve() if args.work_dir else \
@@ -97,7 +101,6 @@ def main() -> int:
         "pitch": "+0Hz",
         "tts_type": 1,
         "filename": out_wav.as_posix(),
-        "openvoice_output": out_wav.as_posix(),
     }]
     queue_path.write_text(json.dumps(queue, ensure_ascii=False), encoding="utf-8")
 

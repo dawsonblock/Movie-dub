@@ -26,8 +26,10 @@ Fallback (always available, no extra deps beyond librosa):
 
 The plugin is loaded lazily and only once per process. If the import or model
 load fails for any reason (missing package, no network, wrong torch version,
-corrupted download), the fallback is used silently and the failure is recorded
-so callers can report it.
+corrupted download), ``estimate_age`` falls back to a subprocess invocation of
+the dedicated ``.venv-age`` interpreter (if it exists) before finally using the
+pitch heuristic. This lets the main pipeline in the pyVideoTrans venv benefit
+from the trained model without installing TensorFlow/speechbrain into that venv.
 
 This module imports no third-party packages at module load time, so it is safe
 to import from the bare system interpreter (doctor.py, run_personal_dub.py).
@@ -56,6 +58,16 @@ _regressor: Any | None = None
 _loaded_source: str = ""
 _load_attempted: bool = False
 _load_error: str = ""
+
+# Project paths used to locate the .venv-age subprocess fallback.
+ROOT = Path(__file__).resolve().parents[1]
+_VENV_AGE = ROOT / ".venv-age"
+_VENV_AGE_PYTHON = _VENV_AGE / "bin" / "python"
+_SUBPROCESS_HELPER = ROOT / "scripts" / "age_model_subprocess.py"
+
+# Internal kill-switch for the subprocess fallback. Tests reset the singleton
+# and must not accidentally invoke a real model load through .venv-age.
+_subprocess_enabled: bool = True
 
 
 class AgeEstimate(dict):
@@ -113,12 +125,70 @@ def get_regressor(
 
 def reset_for_tests() -> None:
     """Reset the singleton so a fresh load can be attempted (tests only)."""
-    global _regressor, _load_attempted, _load_error, _loaded_source
+    global _regressor, _load_attempted, _load_error, _loaded_source, _subprocess_enabled
     with _lock:
         _regressor = None
         _load_attempted = False
         _load_error = ""
         _loaded_source = ""
+        _subprocess_enabled = False
+
+
+def _subprocess_available() -> bool:
+    """True if the .venv-age helper exists and can be used as a fallback."""
+    return _subprocess_enabled and _VENV_AGE_PYTHON.is_file() and _SUBPROCESS_HELPER.is_file()
+
+
+def _estimate_age_via_subprocess(
+    reference_wav: Path,
+    pitch: dict,
+    repo: str,
+    model_path: str | None,
+) -> dict | None:
+    """Run age estimation in the .venv-age subprocess.
+
+    Returns the parsed JSON dict on success, or None if the subprocess is
+    unavailable, exits non-zero, or returns invalid JSON. This is a safe
+    bridge: callers can still fall back to the pitch heuristic.
+    """
+    import json
+    import subprocess
+
+    if not _subprocess_available():
+        return None
+
+    args = [
+        str(_VENV_AGE_PYTHON),
+        str(_SUBPROCESS_HELPER),
+        "--reference-wav", reference_wav.as_posix(),
+        "--pitch-json", json.dumps(pitch),
+        "--repo", repo,
+    ]
+    if model_path:
+        args.extend(["--model-path", model_path])
+
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        # TensorFlow/Keras progress bars are written to stdout, so the actual
+        # JSON result is usually the last line starting with "{".
+        for line in reversed(result.stdout.strip().splitlines()):
+            line = line.strip()
+            if line.startswith("{"):
+                parsed = json.loads(line)
+                if parsed.get("source") == "model":
+                    return parsed
+                return None
+        return None
+    except Exception:
+        return None
 
 
 def last_load_error() -> str:
@@ -246,6 +316,13 @@ def estimate_age(
     # auto or on: try the model
     regressor = get_regressor(repo=repo, model_path=model_path)
     if regressor is None:
+        # In-process model not available. If .venv-age exists, try the model
+        # there as a subprocess before falling back to the pitch heuristic.
+        sub_result = _estimate_age_via_subprocess(
+            Path(reference_wav), pitch, repo, model_path
+        )
+        if sub_result is not None:
+            return sub_result
         if use_model == "on":
             raise RuntimeError(
                 f"age model requested (--age-model on) but unavailable: "

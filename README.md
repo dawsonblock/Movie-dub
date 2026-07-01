@@ -76,6 +76,8 @@ Optional — Qwen3-TTS local engine (Apple Silicon, independent of OpenVoice):
 make setup-qwen3
 make doctor-qwen3
 make smoke-qwen3
+make setup-age        # optional: install trained age-regression model
+make smoke-age
 ```
 
 The default install does **not** require Demucs. Demucs is only needed for
@@ -160,7 +162,8 @@ Start with a 1-2 minute clip (clear speech, one or two speakers, little music)
 before trying long videos.
 
 ```bash
-make dub INPUT=~/Movies/test.mp4 OUTPUT=~/Movies/dubbed-test.mp4
+# Apple Silicon: use CPU_ONLY=1 if whisper-large-v3-turbo hits MPS OOM
+make dub INPUT=~/Movies/test.mp4 OUTPUT=~/Movies/dubbed-test.mp4 CPU_ONLY=1
 ```
 
 Optional flags:
@@ -232,12 +235,22 @@ diarize speakers, extract a canonical reference voice per speaker, and
 estimate apparent gender / age band / pitch per speaker:
 
 ```bash
-# Requires HF_TOKEN for pyannote diarization
+# Requires HF_TOKEN for pyannote diarization (gated model; accept terms at
+# https://hf.co/pyannote/speaker-diarization-3.1 and
+# https://hf.co/pyannote/segmentation-3.0)
 export HF_TOKEN=hf_xxxxx
 make dub INPUT=movie.mp4 OUTPUT=dubbed.mp4 \
      SPEAKER_PROFILING=1 DIARIZATION=pyannote \
-     TTS_ENGINE=openvoice VERIFY_PITCH=1
+     TTS_ENGINE=openvoice VERIFY_PITCH=1 AGE_MODEL=auto \
+     CHARACTER_PROFILES=1 CPU_ONLY=1
 ```
+
+`AGE_MODEL=auto` uses the trained age regressor from `.venv-age` when
+available; it runs the model in a subprocess so it doesn't pollute the
+pyVideoTrans venv. `CHARACTER_PROFILES=1` writes `character_profiles.json`
+with named, reviewable characters (and respects `voice_locked`).
+`CPU_ONLY=1` is recommended on Apple Silicon for the initial Whisper pass
+because `whisper-large-v3-turbo` can exhaust MPS memory.
 
 #### Where the text comes from: subtitles vs. ASR
 

@@ -7,7 +7,9 @@ deps required (the model is never installed in CI).
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -16,6 +18,7 @@ from age_model import (
     DEFAULT_AGE_MODEL_REPO,
     _heuristic_age,
     _resolve_source,
+    _subprocess_available,
     _years_to_band,
     estimate_age,
     get_regressor,
@@ -212,6 +215,78 @@ class TestSingleton:
 
     def test_loaded_source_empty_before_load(self):
         assert loaded_source() == ""
+
+
+# ---------------------------------------------------------------------------
+# Subprocess fallback
+# ---------------------------------------------------------------------------
+
+class TestSubprocessFallback:
+    PITCH = {"median_f0_hz": 120, "voiced_ratio": 0.7,
+             "p10_f0_hz": 90, "p90_f0_hz": 160}
+
+    @pytest.fixture(autouse=True)
+    def _reset_and_disable_subprocess(self):
+        reset_for_tests()
+        assert _subprocess_available() is False
+        yield
+        reset_for_tests()
+
+    def test_auto_uses_subprocess_when_inprocess_model_unavailable(
+        self, tmp_path, monkeypatch
+    ):
+        """When the in-process model is missing, .venv-age result is used."""
+        ref = tmp_path / "ref.wav"
+        ref.write_bytes(b"fake audio")
+
+        # Re-enable subprocess for this test only (reset_for_tests disables it).
+        monkeypatch.setattr(age_model, "_subprocess_enabled", True)
+        fake_result = {
+            "band": "adult",
+            "estimated_years": 35.0,
+            "confidence": 0.78,
+            "source": "model",
+            "method": "models/age_reg_ann_ecapa_librosa_combined",
+            "note": "Apparent vocal age estimate; not exact biological age.",
+        }
+        fake_run = MagicMock()
+        fake_run.returncode = 0
+        # TensorFlow/Keras progress bars are written to stdout; include noise.
+        fake_run.stdout = f"\n\x1b[1m1/1\x1b[0m ...\n{json.dumps(fake_result)}"
+        fake_run.stderr = ""
+
+        with patch("subprocess.run", return_value=fake_run):
+            result = estimate_age(ref, self.PITCH, use_model="auto")
+
+        assert result["source"] == "model"
+        assert result["estimated_years"] == 35.0
+        assert result["method"] == "models/age_reg_ann_ecapa_librosa_combined"
+        assert "note" in result
+
+    def test_subprocess_failure_falls_back_to_heuristic(
+        self, tmp_path, monkeypatch
+    ):
+        """If the .venv-age subprocess fails, estimate_age falls back."""
+        ref = tmp_path / "ref.wav"
+        ref.write_bytes(b"fake audio")
+        monkeypatch.setattr(age_model, "_subprocess_enabled", True)
+
+        with patch("subprocess.run", side_effect=OSError("subprocess failed")):
+            result = estimate_age(ref, self.PITCH, use_model="auto")
+
+        assert result["source"] == "heuristic"
+        assert result["method"] == "pitch_heuristic"
+
+    def test_on_raises_when_both_inprocess_and_subprocess_fail(
+        self, tmp_path, monkeypatch
+    ):
+        ref = tmp_path / "ref.wav"
+        ref.write_bytes(b"fake audio")
+        monkeypatch.setattr(age_model, "_subprocess_enabled", True)
+
+        with patch("subprocess.run", side_effect=OSError("subprocess failed")):
+            with pytest.raises(RuntimeError, match="make setup-age"):
+                estimate_age(ref, self.PITCH, use_model="on")
 
 
 # ---------------------------------------------------------------------------

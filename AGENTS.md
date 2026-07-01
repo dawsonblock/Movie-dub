@@ -11,6 +11,16 @@ Build/test commands and conventions learned while working in this repo.
 - **Age model status:** `python3 scripts/age_model.py` (exit 1 = unavailable, falls back to heuristic)
 - **Syntax check a script:** `python3 -c "import ast; ast.parse(open('scripts/x.py').read())"`
 
+## macOS / environment notes
+
+- **Whisper MPS out-of-memory:** On Apple Silicon, `whisper-large-v3-turbo` can
+  exhaust the MPS memory pool. Use `CPU_ONLY=1` on `make dub` / `make
+  benchmark` to force Whisper to CPU (OpenVoice still uses MPS).
+- **HF_TOKEN:** Speaker profiling (`SPEAKER_PROFILING=1`) requires the
+  `pyannote/speaker-diarization-3.1` model, which is gated. Set a valid token
+  and accept the model terms at https://hf.co/pyannote/speaker-diarization-3.1
+  and https://hf.co/pyannote/segmentation-3.0.
+
 ## Test suite
 
 Tests live in `tests/` and use pytest. `conftest.py` adds `scripts/` to
@@ -50,16 +60,19 @@ Tests live in `tests/` and use pytest. `conftest.py` adds `scripts/` to
 ## v0.12 modules
 
 - `scripts/age_model.py` — age regressor plugin + pitch heuristic fallback.
-  Lazy-loaded singleton; safe to import from bare interpreter. Runs in a
-  dedicated `.venv-age` (created by `make setup-age`). Model weights live in
+  Lazy-loaded singleton; safe to import from bare interpreter. Installed into
+  `.venv-age` (created by `make setup-age`). Model weights live in
   `models/age_reg_ann_ecapa_librosa_combined` (gitignored, fetched via
   `hf download`, never `git clone`). Supports `model_path` (local dir
   preferred over HF repo id), `young_adult` band, and a `method` field.
   The Python package is `voice_age_regressor` (import
-  `from voice_age_regressor import AgeRegressionPipeline`). **Proven
-  operational on macOS ARM64**: `make setup-age` + `make doctor-age` +
-  `make smoke-age` all pass; male ref → 26.5y (young_adult, conf 0.78),
-  female ref → 33.9y (young_adult).
+  `from voice_age_regressor import AgeRegressionPipeline`). When the main
+  interpreter (e.g. pyVideoTrans venv) cannot import `voice_age_regressor`,
+  `estimate_age` transparently falls back to a `.venv-age` subprocess
+  (`scripts/age_model_subprocess.py`) so the full pipeline still gets the
+  trained model. **Proven operational on macOS ARM64**: `make setup-age` +
+  `make doctor-age` + `make smoke-age` all pass; male ref → 26.5y
+  (young_adult, conf 0.78), female ref → 33.9y (young_adult).
 - `scripts/estimate_speaker_age.py` — standalone CLI wrapper for one WAV.
   Run inside `.venv-age`.
 - `scripts/setup_age_model.sh` — creates `.venv-age`, installs

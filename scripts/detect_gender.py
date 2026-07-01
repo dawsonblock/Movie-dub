@@ -32,7 +32,8 @@ def extract_audio_sample(
     if not ffmpeg:
         return None
 
-    tmp = Path(tempfile.mktemp(suffix=".wav"))
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        tmp = Path(f.name)
     cmd = [
         ffmpeg, "-hide_banner", "-nostdin", "-y",
         "-i", video_path.as_posix(),
@@ -63,7 +64,7 @@ def detect_gender_from_audio(audio_path: Path) -> tuple[str, float]:
 
     try:
         y, sr = librosa.load(audio_path.as_posix(), sr=16000, mono=True)
-    except Exception:
+    except (FileNotFoundError, ValueError, RuntimeError):
         return ("unknown", 0.0)
 
     if len(y) < sr * 0.5:
@@ -74,7 +75,7 @@ def detect_gender_from_audio(audio_path: Path) -> tuple[str, float]:
         f0, voiced_flag, _ = librosa.pyin(
             y, fmin=65, fmax=400, sr=sr, frame_length=2048
         )
-    except Exception:
+    except (ValueError, RuntimeError):
         return ("unknown", 0.0)
 
     # Filter to voiced frames only

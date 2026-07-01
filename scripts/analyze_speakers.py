@@ -95,7 +95,8 @@ def extract_full_audio(video_path: Path, sample_rate: int = 16000,
                        out_path: Path | None = None) -> Path:
     """Extract the full audio track as a mono WAV at the given sample rate."""
     if out_path is None:
-        out_path = Path(tempfile.mktemp(suffix=".wav"))
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            out_path = Path(f.name)
     cmd = [
         local_ffmpeg(), "-hide_banner", "-nostdin", "-y",
         "-i", video_path.as_posix(),
@@ -207,7 +208,8 @@ def run_built_diarization(
     ) as f:
         json.dump(subtitles, f)
         subs_file = Path(f.name)
-    speak_file = Path(tempfile.mktemp(suffix=".json"))
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+        speak_file = Path(f.name)
     try:
         kw = {
             "input_file": audio_path.as_posix(),
@@ -306,7 +308,7 @@ def _clip_quality_score(
             )
             voiced = voiced_flag & ~np.isnan(f0)
             voiced_ratio = float(np.sum(voiced)) / float(len(f0)) if len(f0) else 0.0
-        except Exception:
+        except (ValueError, RuntimeError):
             voiced_ratio = 0.0
         # low_noise: estimate noise floor from non-voiced frame RMS
         # (cheap proxy: voiced frames are signal, the rest is noise/silence)
@@ -317,7 +319,7 @@ def _clip_quality_score(
             low_noise = 0.9
         else:
             low_noise = 0.2
-    except (ImportError, FileNotFoundError, Exception):
+    except (ImportError, FileNotFoundError, ValueError, RuntimeError):
         # No librosa or audio unavailable: rely on diarization + length only.
         pass
 

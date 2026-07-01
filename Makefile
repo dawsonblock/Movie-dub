@@ -1,4 +1,4 @@
-.PHONY: doctor doctor-strict doctor-demucs doctor-qwen3 setup-ffmpeg setup-pyvt setup-qwen3 setup-omnivoice smoke-qwen3 smoke-e2e test test-unit test-verbose setup-dev test-pyvt dub proof proof-report analyze-speakers verify-pitch clean character-profiles character-rename character-lock character-review regenerate failed-segments change-speaker benchmark cache-stats age-model-status setup-age doctor-age smoke-age
+.PHONY: doctor doctor-strict doctor-demucs doctor-qwen3 setup-ffmpeg setup-pyvt setup-qwen3 setup-omnivoice smoke-qwen3 smoke-e2e test test-unit test-verbose setup-dev test-pyvt dub proof proof-report analyze-speakers verify-pitch clean character-profiles character-rename character-lock character-review regenerate failed-segments change-speaker benchmark cache-stats age-model-status setup-age doctor-age smoke-age compile
 
 doctor:
 	python3 scripts/doctor.py
@@ -9,6 +9,11 @@ clean:
 	rm -rf reports
 	rm -f /tmp/movie-dub-doctor.out /tmp/movie-dub-proof/checks.json
 	rm -rf /tmp/movie-dub-proof
+
+# Syntax-check all project Python files. Excludes vendored venvs because
+# third-party packages may contain py2/template files that fail compileall.
+compile:
+	python3 -m compileall -q . -x '/\.venv/'
 
 doctor-strict:
 	python3 scripts/doctor.py --strict

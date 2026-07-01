@@ -93,9 +93,12 @@ def test_bridge_writes_manifest_with_mocked_model(tmp_path):
         "--language", "en",
     ])
 
-    with mock.patch.object(
-        qwen3_bridge, "load_qwen3_model", return_value=FakeModel()
-    ):
+    with mock.patch.object(qwen3_bridge, "load_qwen3_model", return_value=FakeModel()), \
+         mock.patch.object(qwen3_bridge, "load_reference_audio", return_value=np.zeros(24000)), \
+         mock.patch.object(qwen3_bridge, "write_generated_audio") as write_audio:
+        def _write(path, audio, sr):
+            Path(path).write_bytes(b"fake wav")
+        write_audio.side_effect = _write
         rc = qwen3_bridge.synthesize_segments(args)
 
     assert manifest_path.is_file(), "manifest was not written"

@@ -42,11 +42,19 @@ not require a separate venv or server.
 
 ## Requirements
 
-- macOS with Python 3.10
+| Runtime | Python | Purpose |
+| --- | --- | --- |
+| Root wrapper / `scripts/` | **Python 3.12** (or the `python3` on your PATH) | Qwen3 bridge, scripts, tests, MLX on Apple Silicon |
+| `pyvideotrans-main/.venv` | **Python 3.10** | pyVideoTrans runtime (Whisper, translation, etc.) |
+| `.venv-age` (optional) | **Python 3.10** | Optional age-regression model |
+
+- macOS with the Python versions above
 - local `ffmpeg` and `ffprobe`
-- `pyvideotrans-main/.venv`
+- `pyvideotrans-main/.venv` (Python 3.10)
 - Qwen3-TTS model (`models/Qwen3-TTS-12Hz-0.6B-Base-bf16`)
 - a reference WAV for voice cloning (e.g. `voices/reference.wav`)
+
+The root `.python-version` is pinned to `3.12.0` for the wrapper/tests; pyVideoTrans and the age model stay on Python 3.10 in their own venvs. Do not mix them.
 
 ## Install
 
@@ -118,9 +126,9 @@ bin/test --verbose
 ```
 
 If `make test` fails with "pytest is not installed", run `make setup-dev`
-first. The `.python-version` file pins the repo to Python 3.12.0 via pyenv;
-if you use a different version, make sure pytest is installed for it
-(`python3 -m pip install pytest`).
+first. The root `.python-version` file pins the wrapper/tests to Python
+3.12.0 via pyenv; if you use a different version, make sure pytest is
+installed for it (`python3 -m pip install pytest`).
 
 ## Dub Your Own Video
 

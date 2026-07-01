@@ -3,9 +3,9 @@
 #
 # The Qwen3 bridge (bridge/qwen3_segment_tts.py) runs on the SAME python
 # that runs scripts/run_personal_dub.py (sys.executable). The Makefile
-# invokes the wrapper with `python3`, so this script installs the
-# required packages into that interpreter by default. Override with
-# PYTHON_BIN=/path/to/python if you run the wrapper with a different one.
+# invokes the wrapper with `python3` (root Python 3.12), so this script
+# installs the required packages into that interpreter by default. Override
+# with PYTHON_BIN=/path/to/python if you run the wrapper with a different one.
 #
 # What this installs:
 #   mlx-audio        Apple Silicon on-device TTS runtime
@@ -35,7 +35,7 @@ if ! echo "$MODEL_REPO" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
 fi
 
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-  echo "Missing $PYTHON_BIN. Install Python 3.10+ first, then rerun." >&2
+  echo "Missing $PYTHON_BIN. Install Python 3.12 first, then rerun." >&2
   exit 1
 fi
 

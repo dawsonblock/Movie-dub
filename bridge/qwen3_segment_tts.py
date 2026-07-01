@@ -206,6 +206,13 @@ def load_reference_audio(ref_path: str):
     return mx.array(audio_np)
 
 
+def write_generated_audio(path: Path, audio_np, sample_rate: int = 24000) -> None:
+    """Write generated audio to a WAV file using soundfile."""
+    import soundfile as sf
+
+    sf.write(path.as_posix(), audio_np, sample_rate)
+
+
 # ---------------------------------------------------------------------------
 # Segment synthesis
 # ---------------------------------------------------------------------------
@@ -316,9 +323,7 @@ def synthesize_segments(args: argparse.Namespace) -> int:
             audio_np = np.array(gen_results[0].audio)
 
             # Write WAV at 24 kHz (Qwen3-TTS native sample rate)
-            import soundfile as sf
-
-            sf.write(output_path.as_posix(), audio_np, 24000)
+            write_generated_audio(output_path, audio_np, 24000)
 
             generated = wav_duration(output_path.as_posix())
             ratio, timing = duration_status(generated, target_duration)

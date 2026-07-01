@@ -4,12 +4,13 @@ Build/test commands and conventions learned while working in this repo.
 
 ## Verification commands
 
-- **Unit tests:** `make test` or `python3 -m pytest tests/ -q` (266 tests, lightweight, no model deps)
+- **Unit tests:** `make test` or `python3 -m pytest tests/ -q` (266 pytest items / 251 test functions, lightweight, no model deps)
 - **Lint:** `ruff check scripts/` (must be clean; repo history shows lint fixes are expected)
 - **Doctor:** `python3 scripts/doctor.py` → must print `READY: yes` with 0 required failures
 - **E2E smoke:** `python3 scripts/smoke_e2e_short_clip.py --tts-engine qwen3-local` (needs Qwen3 model; ~minutes)
 - **Age model status:** `python3 scripts/age_model.py` (exit 1 = unavailable, falls back to heuristic)
 - **Syntax check a script:** `python3 -c "import ast; ast.parse(open('scripts/x.py').read())"`
+- **Syntax check project:** `make compile` (excludes vendored `.venv` dirs)
 
 ## macOS / environment notes
 
@@ -49,8 +50,9 @@ Tests live in `tests/` and use pytest. `conftest.py` adds `scripts/` to
 
 ## Architecture
 
-- Isolated venvs: `pyvideotrans-main/.venv` (pyannote/librosa/whisper) and the
-  wrapper interpreter for Qwen3 (MLX). Never merge them.
+- Isolated venvs: `pyvideotrans-main/.venv` (Python 3.10, pyannote/librosa/whisper)
+  and the root wrapper interpreter (Python 3.12) for Qwen3 (MLX), scripts, and
+  tests. Never merge them.
 - `scripts/run_personal_dub.py` is the main CLI. It always runs the **split
   pipeline**: STT → STS → analyze_speakers → direct bridge → build audio → remux.
 - Bridges live in `bridge/` (`qwen3_segment_tts.py`, `omnivoice_segment_tts.py`).

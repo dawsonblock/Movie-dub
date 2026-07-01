@@ -284,6 +284,14 @@ class TestComputeSegmentCacheKeys:
         for v in keys.values():
             assert len(v) == 24
 
+    def test_tts_speed_change(self):
+        q = self._base_queue()
+        kwargs = self._base_kwargs()
+        k1 = _compute_segment_cache_keys(q, **kwargs)
+        kwargs2 = {**kwargs, "tts_speed": 1.2}
+        k2 = _compute_segment_cache_keys(q, **kwargs2)
+        assert k1["1"] != k2["1"]
+
 
 # ---------------------------------------------------------------------------
 # End-to-end cache hit/miss simulation

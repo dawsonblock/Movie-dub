@@ -15,7 +15,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 
-python3 -m pip install --upgrade gradio_client requests soundfile
+python3 -m pip install --upgrade "gradio_client==2.0.3" requests soundfile
 
 echo "OmniVoice bridge dependencies installed."
 echo "Next: start your OmniVoice server and run with --tts-engine omnivoice --omnivoice-url <url>"

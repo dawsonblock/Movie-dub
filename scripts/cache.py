@@ -89,6 +89,7 @@ def segment_cache_key(
     voice_rate: str = "+0%",
     volume: str = "+0%",
     pitch: str = "+0Hz",
+    tts_speed: float = 1.0,
 ) -> str:
     """Build a deterministic cache key for one TTS segment output.
 
@@ -98,7 +99,7 @@ def segment_cache_key(
     reference voice, or the synthesis parameters.
     """
     parts = [
-        "v1",
+        "v2",
         source_audio_hash,
         subtitle_hash,
         speaker_profile_hash,
@@ -110,6 +111,7 @@ def segment_cache_key(
         voice_rate,
         volume,
         pitch,
+        str(tts_speed),
     ]
     blob = "|".join(parts).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()[:24]

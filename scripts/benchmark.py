@@ -380,8 +380,12 @@ def run_benchmark(args: argparse.Namespace) -> int:
         cmd.extend(["--omnivoice-url", args.omnivoice_url])
     if args.tts_speed != 1.0:
         cmd.extend(["--tts-speed", str(args.tts_speed)])
+    if args.character_profiles:
+        cmd.append("--character-profiles")
     if args.age_model:
         cmd.extend(["--age-model", args.age_model])
+    if args.age_model_path:
+        cmd.extend(["--age-model-path", args.age_model_path])
     if args.resume:
         cmd.append("--resume")
     if args.skip_existing:
@@ -484,6 +488,8 @@ def main() -> int:
     parser.add_argument("--target-lufs", type=float, default=None)
     parser.add_argument("--background-volume", type=float, default=None)
     parser.add_argument("--ducking", action="store_true")
+    parser.add_argument("--character-profiles", action="store_true",
+                        help="also write character_profiles.json alongside speaker_profiles")
     parser.add_argument("--qwen3-model", default="")
     parser.add_argument("--omnivoice-url", default="",
                         help="OmniVoice server URL (required when --tts-engine omnivoice)")
@@ -491,6 +497,9 @@ def main() -> int:
                         help="speech speed multiplier (default 1.0)")
     parser.add_argument("--age-model", default="",
                         choices=["auto", "on", "off"])
+    parser.add_argument("--age-model-path", default="",
+                        help="local age model dir "
+                             "(passed to analyze_speakers)")
     parser.add_argument("--confidence-threshold", type=float, default=0.5,
                         help="age/gender confidence below this counts as a bad guess")
     parser.add_argument("--resume", action="store_true",

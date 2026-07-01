@@ -332,7 +332,8 @@ benchmark:
 		echo "Usage: make benchmark INPUT=<clip> OUTPUT_DIR=<dir>"; \
 		echo "  TTS_ENGINE=qwen3-local SPEAKER_PROFILING=1 HF_TOKEN=\$$HF_TOKEN"; \
 		echo "  TARGET_LUFS=-16 VERIFY_PITCH=1 PREFER_EMBEDDED_SUBTITLES=1"; \
-		echo "  AGE_MODEL=auto CHARACTER_PROFILES=1"; \
+		echo "  AGE_MODEL=auto AGE_MODEL_PATH=... CHARACTER_PROFILES=1"; \
+		echo "  OMNIVOICE_URL=http://localhost:3900 TTS_SPEED=1.0"; \
 		exit 1; \
 	fi
 	python3 scripts/benchmark.py \
@@ -352,8 +353,11 @@ benchmark:
 		$(if $(BACKGROUND_VOLUME),--background-volume $(BACKGROUND_VOLUME)) \
 		$(if $(DUCKING),--ducking) \
 		$(if $(QWEN3_MODEL),--qwen3-model $(QWEN3_MODEL)) \
+		$(if $(OMNIVOICE_URL),--omnivoice-url $(OMNIVOICE_URL)) \
+		$(if $(TTS_SPEED),--tts-speed $(TTS_SPEED)) \
 		$(if $(AGE_MODEL),--age-model $(AGE_MODEL)) \
 		$(if $(AGE_MODEL_PATH),--age-model-path $(AGE_MODEL_PATH)) \
+		$(if $(CHARACTER_PROFILES),--character-profiles) \
 		$(if $(RESUME),--resume) \
 		$(if $(SKIP_EXISTING),--skip-existing)
 

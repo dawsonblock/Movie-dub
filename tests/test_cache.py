@@ -151,6 +151,11 @@ class TestSegmentCacheKey:
         base["voice_rate"] = "+10%"
         assert segment_cache_key(**base) != segment_cache_key(**self.BASE)
 
+    def test_tts_speed_change(self):
+        base = dict(self.BASE)
+        base["tts_speed"] = 1.2
+        assert segment_cache_key(**base) != segment_cache_key(**self.BASE)
+
 
 # ---------------------------------------------------------------------------
 # SegmentCache

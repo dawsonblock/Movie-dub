@@ -441,6 +441,7 @@ def _compute_segment_cache_keys(
     tts_engine: str,
     tts_model: str,
     language: str,
+    tts_speed: float = 1.0,
 ) -> dict[str, str]:
     """Compute a deterministic cache key for each queue item.
 
@@ -473,6 +474,7 @@ def _compute_segment_cache_keys(
             voice_rate=item.get("rate", "+0%"),
             volume=item.get("volume", "+0%"),
             pitch=item.get("pitch", "+0Hz"),
+            tts_speed=tts_speed,
         )
     return keys
 
@@ -1521,6 +1523,7 @@ def main() -> int:
                 tts_engine=args.tts_engine,
                 tts_model=tts_model_id,
                 language=args.target_language,
+                tts_speed=args.tts_speed,
             )
             # Check each segment for a cache hit. On hit, copy the cached WAV
             # to the expected filename so downstream code finds it.

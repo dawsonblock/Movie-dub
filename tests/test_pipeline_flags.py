@@ -142,9 +142,25 @@ class TestBenchmarkFlags:
         out = _help_flags("benchmark.py")
         assert "--tts-engine" in out
 
+    def test_omnivoice_url_flag(self):
+        out = _help_flags("benchmark.py")
+        assert "--omnivoice-url" in out
+
+    def test_tts_speed_flag(self):
+        out = _help_flags("benchmark.py")
+        assert "--tts-speed" in out
+
+    def test_character_profiles_flag(self):
+        out = _help_flags("benchmark.py")
+        assert "--character-profiles" in out
+
     def test_age_model_flag(self):
         out = _help_flags("benchmark.py")
         assert "--age-model" in out
+
+    def test_age_model_path_flag(self):
+        out = _help_flags("benchmark.py")
+        assert "--age-model-path" in out
 
 
 class TestReviewLoopFlags:

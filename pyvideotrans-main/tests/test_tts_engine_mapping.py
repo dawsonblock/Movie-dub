@@ -412,18 +412,17 @@ def test_split_pipeline_accepts_qwen3_local(tmp_path):
     )
 
 
-def test_vtv_pipeline_accepts_qwen3_local(tmp_path):
-    """--tts-engine qwen3-local WITHOUT --speaker-profiling must NOT
-    be rejected by the engine guard. The VTV pipeline supports all engines."""
+def test_qwen3_local_without_speaker_profiling_is_not_rejected(tmp_path):
+    """--tts-engine qwen3-local without --speaker-profiling must NOT
+    be rejected by the engine guard (qwen3-local is always supported)."""
     rc, stderr = _run_main_with_args(
         ["--tts-engine", "qwen3-local"],
         tmp_path,
     )
     # rc may be non-zero from a later step, but the engine guard message
-    # must NOT appear (we're not in split mode).
+    # must NOT appear.
     assert "not supported" not in stderr, (
-        f"qwen3-local should not be rejected in VTV mode, but stderr "
-        f"says: {stderr}"
+        f"qwen3-local should not be rejected, but stderr says: {stderr}"
     )
 
 

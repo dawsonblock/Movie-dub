@@ -846,7 +846,7 @@ def main() -> int:
         if not reference.is_file():
             return die(
                 f"male reference voice missing: {reference}. "
-                "Run: python scripts/generate_reference_voices.py"
+                "Provide a reference WAV with --reference."
             )
         detected_gender = "male"
     elif args.gender == "female":
@@ -854,7 +854,7 @@ def main() -> int:
         if not reference.is_file():
             return die(
                 f"female reference voice missing: {reference}. "
-                "Run: python scripts/generate_reference_voices.py"
+                "Provide a reference WAV with --reference."
             )
         detected_gender = "female"
     else:
@@ -896,7 +896,7 @@ def main() -> int:
         if not reference.is_file():
             return die(
                 f"reference WAV missing: {reference}. "
-                "Run: python scripts/generate_reference_voices.py"
+                "Provide a reference WAV with --reference."
             )
 
     # --- Set up job dir (safe deletion policy: Blocker 3) ---
@@ -1020,13 +1020,15 @@ def main() -> int:
             f"omnivoice. "
             f"Supported: {', '.join(sorted(SUPPORTED_SPLIT_ENGINES))}."
         )
-        speakers_dir.mkdir(parents=True, exist_ok=True)
-        if args.speaker_profile_json:
-            src_profile = Path(args.speaker_profile_json).expanduser().resolve()
-            if not src_profile.is_file():
-                return die(f"speaker profile JSON not found: {src_profile}")
-            shutil.copy2(src_profile, speaker_profiles_path)
-            print(f"Speaker profiles (reused): {speaker_profiles_path}")
+
+    # Ensure speakers directory exists before any speaker-profile reuse/write.
+    speakers_dir.mkdir(parents=True, exist_ok=True)
+    if args.speaker_profile_json:
+        src_profile = Path(args.speaker_profile_json).expanduser().resolve()
+        if not src_profile.is_file():
+            return die(f"speaker profile JSON not found: {src_profile}")
+        shutil.copy2(src_profile, speaker_profiles_path)
+        print(f"Speaker profiles (reused): {speaker_profiles_path}")
 
     # --- Initialize job.json (Blocker 12) ---
     job_state = initial_job_state(
@@ -1270,8 +1272,7 @@ def main() -> int:
                 f"are indexed by source segment_index and would misalign "
                 f"with the translated cues. This usually means LLM "
                 f"re-sentence is enabled in pyVideoTrans config — disable "
-                f"it for the split pipeline, or re-run without "
-                f"--speaker-profiling to use the VTV pipeline."
+                f"it (set res_sentence=0) and re-run."
             )
 
         # --- Step 3: analyze_speakers with real segment timings ---

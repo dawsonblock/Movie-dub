@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends fontconfig font
 
 RUN git clone -b dev https://github.com/jianchang512/pyvideotrans.git .
 
-RUN if [ "" = "true" ]; then echo ">>> CUDA" && uv pip install --system -r pyproject.toml --all-extras && uv pip install --system torch==2.7.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu128 && uv pip install --system nvidia-cublas-cu12 nvidia-cudnn-cu12; else echo ">>> CPU" && uv pip install --system -r pyproject.toml --all-extras; fi
+RUN if [ "" = "true" ]; then echo ">>> CUDA" && uv pip install --system -r pyproject.toml --all-extras && uv pip install --system torch==2.11.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu128 && uv pip install --system nvidia-cublas-cu12 nvidia-cudnn-cu12; else echo ">>> CPU" && uv pip install --system -r pyproject.toml --all-extras; fi
 
 RUN rm -rf /root/.cache/uv /tmp/*
 

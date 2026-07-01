@@ -152,7 +152,7 @@ docker run -d -p 7860:7860 \
 uv remove torch torchaudio
 
 # 安装 CUDA 版本 (以 CUDA 12.x 为例)
-uv add torch==2.7 torchaudio==2.7 --index-url https://download.pytorch.org/whl/cu128
+uv add torch==2.11.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu128
 uv add nvidia-cublas-cu12 nvidia-cudnn-cu12
 ```
 

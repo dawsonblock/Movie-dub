@@ -148,7 +148,7 @@ If you have an NVIDIA graphics card, execute the following commands to install t
 uv remove torch torchaudio
 
 # Install CUDA version (Example for CUDA 12.x)
-uv add torch==2.7 torchaudio==2.7 --index-url https://download.pytorch.org/whl/cu128
+uv add torch==2.11.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu128
 uv add nvidia-cublas-cu12 nvidia-cudnn-cu12
 ```
 

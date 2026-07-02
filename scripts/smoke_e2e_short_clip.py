@@ -157,6 +157,17 @@ def main() -> int:
     if not RUN_DUB_SCRIPT.is_file():
         print(f"Missing run script: {RUN_DUB_SCRIPT}", file=sys.stderr)
         return 1
+    # Pre-flight: the split pipeline shells out to the pyVideoTrans venv for
+    # STT/translation. A missing venv produces a cryptic buried traceback;
+    # fail fast with the remediation command instead.
+    pyvt_python = PYVIDEOTRANS / ".venv" / "bin" / "python"
+    if not pyvt_python.is_file():
+        print(
+            f"FAIL: pyVideoTrans venv missing: {pyvt_python}\n"
+            f"Run: make setup-pyvt",
+            file=sys.stderr,
+        )
+        return 1
 
     reference = ensure_reference_wav()
 

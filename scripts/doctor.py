@@ -88,6 +88,34 @@ def python_version_check(section: str, python: Path, name: str) -> Check:
     return check(section, name, major_minor == "3.10", detail)
 
 
+# The root wrapper interpreter (the `python3` that runs doctor.py, the
+# scripts/, the tests, and the Qwen3 bridge) is pinned to Python 3.12 by
+# `.python-version` and the README. doctor.py itself runs under sys.executable,
+# so we can check this in-process without spawning a subprocess.
+WRAPPER_PYTHON_MAJOR_MINOR = (3, 12)
+
+
+def wrapper_python_version_check() -> Check:
+    """Verify the root wrapper interpreter (sys.executable) is Python 3.12.
+
+    The wrapper runs scripts/, tests, and the Qwen3 bridge (MLX on Apple
+    Silicon). `.python-version` pins it to 3.12.0; a mismatch risks broken
+    numpy/MLX wheels and confusing test failures. This is a required check
+    so a wrong wrapper Python fails loudly instead of producing cryptic
+    downstream errors.
+    """
+    vi = sys.version_info
+    actual = f"{vi.major}.{vi.minor}.{vi.micro}"
+    ok = (vi.major, vi.minor) == WRAPPER_PYTHON_MAJOR_MINOR
+    detail = (
+        f"{actual} at {sys.executable}"
+        if ok
+        else f"{actual} at {sys.executable} — expected 3.12.x "
+             f"(see .python-version; use pyenv install 3.12.0)"
+    )
+    return check("System", "wrapper Python 3.12", ok, detail)
+
+
 def binary_check(section: str, name: str, binary: str,
                  local_path: Path | None = None) -> Check:
     found = shutil.which(binary)
@@ -190,6 +218,7 @@ def collect_checks(
     # --- Required group (default install must pass) ---
     checks: list[Check] = [
         check("System", "macOS", sys.platform == "darwin", sys.platform),
+        wrapper_python_version_check(),
         python310_binary_check(),
         binary_check("System", "ffmpeg", "ffmpeg", PYVIDEOTRANS / "ffmpeg" / "ffmpeg"),
         binary_check("System", "ffprobe", "ffprobe", PYVIDEOTRANS / "ffmpeg" / "ffprobe"),

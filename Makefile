@@ -59,7 +59,19 @@ proof:
 		exit 1; \
 	}
 	@python3 -c "import json; d=json.load(open('/tmp/movie-dub-proof/checks.json')); d['e2e_smoke']='pass'; json.dump(d, open('/tmp/movie-dub-proof/checks.json','w'))"
-	@echo "=== 4/4 unit tests ===" && python3 -m pytest tests/ -q || { \
+	@echo "=== 4/4 unit tests ===" && { \
+		python3 -c "import pytest" 2>/dev/null || { \
+			echo "ERROR: pytest is not installed for $$(python3 --version 2>&1)."; \
+			echo "  Fix: make setup-dev"; \
+			python3 scripts/write_proof_report.py --result fail \
+				--failed-check unit_tests \
+				--message "pytest not installed (run: make setup-dev)" \
+				--checks-json /tmp/movie-dub-proof/checks.json \
+				--output reports/proof_qwen3_report.json; \
+			exit 1; \
+		}; \
+		python3 -m pytest tests/ -q; \
+	} || { \
 		python3 scripts/write_proof_report.py --result fail \
 			--failed-check unit_tests \
 			--message "pytest failed" \

@@ -1,4 +1,10 @@
 # Development dependencies for running the test suite and linting.
 # Install with: make setup-dev
+#
+# numpy is required by tests/test_qwen3_bridge.py: the Qwen3 bridge imports
+# numpy inside synthesize_segments() (np.array on generated audio), which the
+# mocked test still exercises even with model/audio I/O mocked. 1.26 is the
+# first numpy release with Python 3.12 wheels.
 pytest>=8.0
 ruff>=0.4
+numpy>=1.26
